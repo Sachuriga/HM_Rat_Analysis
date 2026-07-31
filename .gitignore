@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.ipynb_checkpoints/
+
+# analysis outputs
+session_summary.pdf
+session_summary*.csv
+session_summary.xlsx
+*_analysis_final.pdf
+*_all_plot_data.pkl
