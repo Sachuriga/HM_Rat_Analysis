@@ -3,9 +3,16 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints/
 
+# packaging / tooling
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
 # analysis outputs
 session_summary.pdf
 session_summary*.csv
 session_summary.xlsx
 *_analysis_final.pdf
+*_trial_metrics.csv
 *_all_plot_data.pkl

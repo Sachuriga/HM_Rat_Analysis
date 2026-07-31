@@ -1,8 +1,0 @@
-numpy<2
-scipy
-pandas
-matplotlib
-networkx
-pynwb
-openpyxl
-tqdm

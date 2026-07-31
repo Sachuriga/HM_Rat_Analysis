@@ -1,0 +1,158 @@
+"""End-to-end: both reports run on a synthetic session and produce sane output."""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from hm_rat_analysis.reports import session_summary, trial_report
+
+
+# ------------------------------------------------------- behavioural report
+def test_trial_report_writes_all_three_outputs(session_dir, tmp_path):
+    metrics, plot_data = trial_report.build_report(session_dir, out_dir=tmp_path)
+
+    stem = "20210612_Rat5"
+    assert (tmp_path / f"{stem}_analysis_final.pdf").stat().st_size > 0
+    assert (tmp_path / f"{stem}_trial_metrics.csv").exists()
+    assert (tmp_path / f"{stem}_all_plot_data.pkl").exists()
+
+    assert list(metrics["trial_id"]) == [1, 2, 3, 4]
+    assert (metrics["goal_node"] == "217").all()
+    # every trial has a start node, so both scores resolve
+    assert metrics["dist_log_score"].notna().all()
+    # scores are log(optimal/actual): never above 0, since actual >= optimal
+    assert (metrics["dist_log_score"] <= 1e-9).all()
+    assert (metrics["actual_dist_px"] >= metrics["optimal_dist_px"]).all()
+
+
+def test_trial_report_goal_detection_matches_the_fixture(session_dir, tmp_path):
+    """Odd trials in the fixture end on the goal node; even trials are shifted away."""
+    metrics, _ = trial_report.build_report(session_dir, out_dir=tmp_path)
+    reached = dict(zip(metrics["trial_id"], metrics["goal_reached"]))
+    assert reached[1] and reached[3]
+    assert not reached[2] and not reached[4]
+    notes = dict(zip(metrics["trial_id"], metrics["score_note"]))
+    assert notes[1] == "(Start->FirstGoal)"
+    assert notes[2] == "(Full Path)"
+
+
+def test_plot_data_pickle_keeps_its_historical_columns(session_dir, tmp_path):
+    """Notebooks read these pickles by column name — the schema is a contract."""
+    _, plot_data = trial_report.build_report(session_dir, out_dir=tmp_path)
+    assert list(plot_data.columns) == [
+        "trial_ids", "raw_x_scaled", "raw_y_scaled", "speed_raw_smoothed",
+        "speed_0_5s", "speed_1_0s", "speed_2_0s", "speed_5_0s",
+        "time_seconds", "normalized_time", "stitched_time_seconds",
+        "physical_score_val", "hops_score_val",
+        "path_physical_segments", "path_topological_segments", "node_sequence_str"]
+    row = plot_data.iloc[0]
+    assert row["trial_ids"] == [1, 2, 3, 4]
+    # every per-trial series has one entry per trial, and matching lengths
+    for trial in range(4):
+        n = len(row["raw_x_scaled"][trial])
+        assert len(row["raw_y_scaled"][trial]) == n
+        assert len(row["speed_raw_smoothed"][trial]) in (n, n - 1)
+        assert np.isfinite(row["stitched_time_seconds"][trial]).all()
+
+
+def _walk_shortest_path(start, goal, per_edge=40):
+    """A dense trajectory (pixels) following the graph's own shortest path."""
+    import networkx as nx
+    from hm_rat_analysis import maze
+    graph = maze.build_graph()
+    path = nx.shortest_path(graph, start, goal, weight="weight")
+    pos = nx.get_node_attributes(graph, "pos")
+    legs = []
+    for u, v in zip(path[:-1], path[1:]):
+        (x0, y0), (x1, y1) = pos[u], pos[v]
+        legs.append(np.column_stack([np.linspace(x0, x1, per_edge),
+                                     np.linspace(y0, y1, per_edge)]))
+    return np.vstack(legs), path
+
+
+def test_analyse_trial_scores_an_optimal_route_near_zero():
+    """Walking the graph's own shortest path scores log(optimal/actual) ~ 0."""
+    from hm_rat_analysis import maze
+    nodes, graph = maze.node_table(), maze.build_graph()
+    start, goal = "101", "217"
+    xy, path = _walk_shortest_path(start, goal)
+
+    tr = trial_report.analyse_trial(1, xy, ", ".join(path), goal, nodes, graph)
+    assert tr["goal_reached"]
+    assert tr["dist_log_score"] == pytest.approx(0.0, abs=0.1)
+    assert tr["hops_log_score"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_a_wandering_route_scores_below_an_optimal_one():
+    from hm_rat_analysis import maze
+    nodes, graph = maze.node_table(), maze.build_graph()
+    start, goal = "101", "217"
+    xy, path = _walk_shortest_path(start, goal)
+
+    direct = trial_report.analyse_trial(1, xy, ", ".join(path), goal, nodes, graph)
+    # same endpoints, but with a detour bolted on before the goal is approached
+    detour = np.vstack([xy[:len(xy) // 2], xy[:len(xy) // 2][::-1], xy])
+    wander = trial_report.analyse_trial(2, detour, ", ".join(path), goal, nodes, graph)
+
+    assert wander["actual_dist_px"] > direct["actual_dist_px"]
+    assert wander["dist_log_score"] < direct["dist_log_score"]
+
+
+def test_goal_radius_dominates_for_adjacent_nodes():
+    """Neighbouring nodes are ~61 px apart while GOAL_RADIUS_PX is 50, so the goal
+    registers almost immediately and the distance score is NOT ~0. Pinned because
+    it makes short-hop trials look implausibly efficient."""
+    from hm_rat_analysis import maze
+    nodes, graph = maze.node_table(), maze.build_graph()
+    a = nodes[nodes["id_str"] == "101"].iloc[0]
+    b = nodes[nodes["id_str"] == "102"].iloc[0]
+    assert np.hypot(a.x - b.x, a.y - b.y) < 2 * trial_report.GOAL_RADIUS_PX
+
+    n = 60
+    xy = np.column_stack([np.linspace(a.x, b.x, n), np.linspace(a.y, b.y, n)])
+    tr = trial_report.analyse_trial(1, xy, "101, 102", "102", nodes, graph)
+    assert tr["goal_reached"]
+    assert tr["dist_log_score"] > 1.0
+
+
+def test_trial_report_cli(session_dir, tmp_path):
+    rc = trial_report.main(["-o", str(session_dir), "--out-dir", str(tmp_path)])
+    assert rc == 0
+    assert list(tmp_path.glob("*_analysis_final.pdf"))
+
+
+def test_trial_report_cli_missing_folder_returns_error(tmp_path):
+    assert trial_report.main(["-o", str(tmp_path / "nope")]) == 1
+
+
+# ----------------------------------------------------------- session summary
+def test_session_summary_end_to_end(nwb_root):
+    session_summary.run(nwb_root)
+
+    pdf = nwb_root / "session_summary.pdf"
+    xlsx = nwb_root / "session_summary.xlsx"
+    assert pdf.stat().st_size > 0 and xlsx.exists()
+
+    sessions = pd.read_excel(xlsx, "sessions")
+    assert len(sessions) == 4
+    assert set(sessions["animal"]) == {"Rat5", "Rat6"}
+    assert (sessions["n_good"] == 6).all() and (sessions["n_mua"] == 2).all()
+    # place-field metrics were actually computed, not silently skipped
+    assert sessions["spatial_info"].notna().all()
+    assert sessions["n_fields"].notna().all()
+    # the fixture's goal node is real, so field-to-goal distances resolve
+    assert sessions["field_goal_m"].notna().all()
+
+    units = pd.read_excel(xlsx, "units")
+    assert len(units) == 24                       # 6 good units x 4 sessions
+    assert set(units["cell_type"]) <= {"pyramidal", "interneuron"}
+
+
+def test_session_summary_on_empty_root_is_a_no_op(tmp_path, capsys):
+    session_summary.run(tmp_path)
+    assert "No .nwb files found" in capsys.readouterr().out
+    assert not (tmp_path / "session_summary.pdf").exists()
+
+
+def test_session_summary_cli(nwb_root):
+    assert session_summary.main(["--root", str(nwb_root)]) == 0

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hm-rat-analysis"
+version = "0.1.0"
+description = "Analysis and figures for the HexMaze rat experiments"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy<2",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "networkx",
+    "pynwb",
+    "openpyxl",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+hm-session-summary = "hm_rat_analysis.reports.session_summary:main"
+hm-trial-report = "hm_rat_analysis.reports.trial_report:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hm_rat_analysis = ["data/*.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

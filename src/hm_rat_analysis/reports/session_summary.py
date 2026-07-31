@@ -12,35 +12,39 @@ a function of session date (labelled with Repeat & Session) —:
   - pyramidal mean place-field distance to the goal node (m)
 
 Cell type + waveform metrics are read from the NWB when step u stored them, else
-recomputed (spike_metrics). Place-field metrics are computed here from the NWB
-position + units (via nwb_io), using the session's dominant goal node.
+recomputed (:mod:`hm_rat_analysis.spike_metrics`). Place-field metrics are
+computed here from the NWB position + units, using the session's dominant goal
+node.
 
 Usage:
-    python session_summary.py --root <folder> [--bin_cm 5] [--speed 0.05]
+    hm-session-summary --root <folder> [--bin_cm 5] [--speed 0.05]
 """
 
+import argparse
 import re
 import sys
-import argparse
 import traceback
+from collections import Counter, defaultdict
 from pathlib import Path
-from collections import defaultdict, Counter
 
 import numpy as np
 import pandas as pd
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from scipy.stats import f_oneway, ttest_ind
-from pynwb import NWBHDF5IO
+import matplotlib.pyplot as plt                                   # noqa: E402
+from matplotlib.backends.backend_pdf import PdfPages              # noqa: E402
+from pynwb import NWBHDF5IO                                       # noqa: E402
+
+from .. import maze, nwb as nwbio, spike_metrics as SM, stats     # noqa: E402
+from ..place_fields import place_field_metrics                    # noqa: E402
 
 try:
     from tqdm import tqdm
     _HAS_TQDM = True
-except Exception:                      # graceful fallback if tqdm is absent
+except ImportError:                    # graceful fallback if tqdm is absent
     _HAS_TQDM = False
+
     def tqdm(it, **k):
         return it
 
@@ -48,10 +52,6 @@ except Exception:                      # graceful fallback if tqdm is absent
 def _log(msg):
     (tqdm.write if _HAS_TQDM else print)(msg)
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import nwb_io as V                 # load_position, place_field_metrics, load_nodes, ...
-import spike_metrics as SM         # waveform_metrics, acg_tau_rise, classify_cell_type
 
 _PF_KEYS = ("spatial_info", "selectivity", "n_fields", "field_goal_m",
             "field_goal_largest_m", "field_goal_2ndlargest_m", "field_goal_smallest_m")
@@ -75,63 +75,6 @@ def _subtype(cell_type, t2p_s):
     if np.isfinite(t2p_s) and t2p_s <= SM.TROUGH_PEAK_THRESH_S:
         return "narrow interneuron"
     return "wide interneuron"
-
-
-# ------------------------------------------------------------
-#                 statistics (ANOVA + post-hoc)
-# ------------------------------------------------------------
-def _groups_by(units, group_col, value_col, order=None):
-    """{group -> finite values} for a metric, using the whole/before epoch rows
-    (one value per neuron per session, matching the plotted line)."""
-    d = units[units["epoch"].isin(["whole", "before"])]
-    out = {}
-    for g, sub in d.groupby(group_col):
-        v = pd.to_numeric(sub[value_col], errors="coerce").to_numpy()
-        out[str(g)] = v[np.isfinite(v)]
-    if order is not None:
-        out = {str(k): out.get(str(k), np.array([])) for k in order}
-    return out
-
-
-def _oneway_anova(groups):
-    """One-way ANOVA across groups (dict or list). Returns (F, p, k, N)."""
-    gs = [g for g in (groups.values() if isinstance(groups, dict) else groups) if len(g) >= 2]
-    if len(gs) < 2:
-        return np.nan, np.nan, len(gs), int(sum(len(g) for g in gs))
-    F, p = f_oneway(*gs)
-    return float(F), float(p), len(gs), int(sum(len(g) for g in gs))
-
-
-def _holm(pvals):
-    """Holm–Bonferroni adjusted p-values."""
-    pvals = np.asarray(pvals, float)
-    m = len(pvals)
-    adj = np.empty(m)
-    prev = 0.0
-    for rank, idx in enumerate(np.argsort(pvals)):
-        prev = max(prev, min((m - rank) * pvals[idx], 1.0))
-        adj[idx] = prev
-    return adj
-
-
-def _posthoc(groups, scope, metric):
-    """Pairwise Welch t-tests between session groups with Holm correction."""
-    keys = [k for k, v in groups.items() if len(v) >= 2]
-    pairs, praw = [], []
-    for i in range(len(keys)):
-        for j in range(i + 1, len(keys)):
-            a, b = groups[keys[i]], groups[keys[j]]
-            tv, p = ttest_ind(a, b, equal_var=False)
-            pairs.append((keys[i], keys[j], len(a), len(b), float(np.mean(a)),
-                          float(np.mean(b)), float(tv), float(p)))
-            praw.append(p)
-    padj = _holm(praw) if praw else []
-    rows = []
-    for (l1, l2, n1, n2, m1, m2, tv, p), pa in zip(pairs, padj):
-        rows.append({"scope": scope, "metric": metric, "group1": l1, "group2": l2,
-                     "n1": n1, "n2": n2, "mean1": m1, "mean2": m2, "t": tv,
-                     "p_raw": p, "p_holm": float(pa), "sig": "*" if pa < 0.05 else ""})
-    return rows
 
 
 def _unit_metrics(nwb, udf, fs=30000.0):
@@ -265,17 +208,17 @@ def collect_session(nwb_path, bin_cm=5.0, sigma=2.0, speed=0.05):
         gm.insert(0, "date", out["date"]); gm.insert(0, "animal", out["animal"])
         out["units"] = gm
 
-        pos = V.load_position(nwb)
+        pos = nwbio.load_position(nwb)
         pyr = good[good["cell_type"] == "pyramidal"]
         if pos is None or not len(pyr):
             return out
-        x = pos[0] / V.SCALE_X; y = pos[1] / V.SCALE_Y; t = pos[2]
+        x = pos[0] / maze.SCALE_X; y = pos[1] / maze.SCALE_Y; t = pos[2]
         dt = float(np.median(np.diff(t))) if t.size > 1 else 1.0 / 30
-        ext = V.MAZE_EXTENT
+        ext = maze.MAZE_EXTENT
         bm = bin_cm / 100.0
         bins = (max(5, int(round((ext[1] - ext[0]) / bm))),
                 max(5, int(round((ext[3] - ext[2]) / bm))))
-        nodes = V.load_nodes()
+        nodes = maze.node_positions_m()
 
         # Per-unit datapoints (for statistics) + the session-level means (for the
         # plots). A base row carries the unit's identity + waveform/ACG metrics.
@@ -299,7 +242,7 @@ def collect_session(nwb_path, bin_cm=5.0, sigma=2.0, speed=0.05):
             means = {k: [] for k in _PF_KEYS}
             for idx in pyr_idx:
                 st = np.asarray(udf.loc[idx, "spike_times"], dtype=float)
-                m, _, _ = V.place_field_metrics(x, y, t, st, ext, bins, dt, sigma, speed,
+                m, _, _ = place_field_metrics(x, y, t, st, ext, bins, dt, sigma, speed,
                                                 goal_xy=gxy, t0=t0, t1=t1)
                 d = _base(idx); d["epoch"] = epoch; d["goal_node"] = goal_node
                 for k in _PF_KEYS:
@@ -312,7 +255,7 @@ def collect_session(nwb_path, bin_cm=5.0, sigma=2.0, speed=0.05):
         # sessions with repeat > 1 (R1S1 and all S>1 stay whole-session).
         type5 = None
         if session == 1 and repeat and repeat > 1:
-            trials = V.build_trials(nwb_path.parent, nwb.session_start_time,
+            trials = nwbio.build_trials(nwb_path.parent, nwb.session_start_time,
                                     float(t.min()), float(t.max()))
             type5 = next((tr for tr in trials if tr[0] == 5), None)
             if type5 is not None:
@@ -395,7 +338,7 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
             ax.legend(fontsize=6)
         ax.set_title(title); ax.set_ylabel(ylab)
         if units_df is not None:        # per-animal one-way ANOVA across sessions
-            _F, p, k, N = _oneway_anova(_groups_by(units_df, "date", key, order=dates))
+            _F, p, k, N = stats.oneway_anova(stats.groups_by(units_df, "date", key, order=dates))
             if np.isfinite(p):
                 ax.text(0.98, 0.03, f"1-way ANOVA p={p:.3g} (k={k})", transform=ax.transAxes,
                         ha="right", va="bottom", fontsize=7,
@@ -448,14 +391,14 @@ def _plot_combined(pdf, units_all):
     fig, axes = plt.subplots(4, 2, figsize=(11, 17))
     axes.ravel()[-1].axis("off")
     for ax, (key, title, ylab) in zip(axes.ravel(), _PF_PLOT):
-        groups = _groups_by(d, "session_label", key)
+        groups = stats.groups_by(d, "session_label", key)
         labs = [l for l in _label_order(groups) if len(groups[l])]
         data = [groups[l] for l in labs]
         xx = np.arange(len(labs))
         if data:
             ax.boxplot(data, positions=xx, widths=0.6, showfliers=False)
             ax.plot(xx, [np.mean(g) for g in data], "o-", color="#2166ac")
-        _F, p, k, N = _oneway_anova(groups)
+        _F, p, k, N = stats.oneway_anova(groups)
         if np.isfinite(p):
             ax.text(0.98, 0.97, f"1-way ANOVA p={p:.3g} (k={k}, N={N})", transform=ax.transAxes,
                     ha="right", va="top", fontsize=8, color="#b2182b" if p < 0.05 else "0.3")
@@ -477,16 +420,16 @@ def _stats_tables(animal_units, units_all):
         u = animal_units[animal]
         dates = sorted(u["date"].unique())
         for key in _PF_KEYS:
-            g = _groups_by(u, "date", key, order=dates)
-            F, p, k, N = _oneway_anova(g)
+            g = stats.groups_by(u, "date", key, order=dates)
+            F, p, k, N = stats.oneway_anova(g)
             anova.append({"scope": animal, "metric": key, "F": F, "p": p, "k_groups": k, "N": N})
-            posthoc += _posthoc(g, animal, key)
+            posthoc += stats.posthoc(g, animal, key)
     for key in _PF_KEYS:
-        g = _groups_by(units_all, "session_label", key)
+        g = stats.groups_by(units_all, "session_label", key)
         g = {l: g[l] for l in _label_order(g)}
-        F, p, k, N = _oneway_anova(g)
+        F, p, k, N = stats.oneway_anova(g)
         anova.append({"scope": "ALL", "metric": key, "F": F, "p": p, "k_groups": k, "N": N})
-        posthoc += _posthoc(g, "ALL", key)
+        posthoc += stats.posthoc(g, "ALL", key)
     return pd.DataFrame(anova), pd.DataFrame(posthoc)
 
 
@@ -746,18 +689,26 @@ def run(root, bin_cm=5.0, sigma=2.0, speed=0.05):
         print(f"Could not write xlsx ({e}); wrote CSVs instead.")
 
 
-if __name__ == "__main__":
+def main(argv=None):
     ap = argparse.ArgumentParser(description="Cross-session per-animal summary plots from NWBs.")
     ap.add_argument("--root", required=True, help="folder to scan recursively for session NWBs.")
     ap.add_argument("--config", required=False, default=None,
                     help="Unused; still accepted so old HM_Tracker_2025 step-[s] invocations keep working.")
-    ap.add_argument("--bin_cm", type=float, default=5.0)
-    ap.add_argument("--speed", type=float, default=0.05)
-    ap.add_argument("--smooth", type=float, default=2.0)
-    args = ap.parse_args()
+    ap.add_argument("--bin_cm", type=float, default=5.0,
+                    help="rate-map bin size in cm (default: 5).")
+    ap.add_argument("--speed", type=float, default=0.05,
+                    help="speed threshold in m/s; slower samples are excluded (default: 0.05).")
+    ap.add_argument("--smooth", type=float, default=2.0,
+                    help="rate-map Gaussian smoothing sigma, in bins (default: 2).")
+    args = ap.parse_args(argv)
     try:
         run(args.root, bin_cm=args.bin_cm, sigma=args.smooth, speed=args.speed)
     except Exception as e:
         print(f"[session-summary] Failed: {e}")
         traceback.print_exc()
-        sys.exit(1)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
