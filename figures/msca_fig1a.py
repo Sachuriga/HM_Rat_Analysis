@@ -280,10 +280,9 @@ def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=3.2):
                        linewidths=1.6, linestyles="solid", zorder=4 + i + 0.5)
 
     if goal_xy:
-        ax.scatter(*goal_xy, s=520, facecolor="none", edgecolor=INK,
-                   linewidths=2.0, zorder=20)
-        ax.scatter(*goal_xy, s=95, facecolor=INK, edgecolor=SURFACE,
-                   linewidths=1.4, zorder=21)
+        # white rim so the star still reads where it sits on top of spikes
+        ax.scatter(*goal_xy, s=1150, marker="*", facecolor=INK,
+                   edgecolor=SURFACE, linewidths=2.0, zorder=21)
         ax.annotate(f"goal {goal_node}", xy=goal_xy,
                     xytext=(goal_xy[0] - 1.30, goal_xy[1] + 0.72),
                     ha="center", color=INK, fontsize=13, fontweight="bold", zorder=22,
