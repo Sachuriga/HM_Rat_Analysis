@@ -68,3 +68,53 @@ def test_shortest_path_segments_handles_unknown_nodes():
 def test_node_table_is_cached_but_callers_get_the_same_object():
     assert maze.node_table() is maze.node_table()
     assert maze.build_graph() is maze.build_graph()
+
+
+def test_idealised_layout_is_a_regular_lattice():
+    """Every edge should be one of the six lattice directions and a whole number
+    of segments long — that is what makes the drawn maze look clean."""
+    G = maze.build_graph()
+    ideal = maze.idealised_positions(G)
+    assert set(ideal) == set(G.nodes)
+
+    lengths, angles = [], []
+    for u, v in G.edges():
+        d = np.array(ideal[v]) - np.array(ideal[u])
+        lengths.append(float(np.hypot(*d)))
+        angles.append(np.degrees(np.arctan2(d[1], d[0])) % 60)
+
+    for a in angles:
+        assert min(a, 60 - a) == pytest.approx(0, abs=1e-6), \
+            "edges must run at multiples of 60 degrees"
+
+    unit = min(lengths)                     # the lattice step is fitted, not fixed
+    assert 0.3 < unit < 0.5
+    for length in lengths:
+        steps = length / unit
+        assert steps == pytest.approx(round(steps), abs=1e-6), \
+            "edge lengths must be whole multiples of the lattice unit"
+
+
+def test_idealised_layout_stays_registered_to_the_measured_one():
+    """The fit is translation-only, so the idealised maze must not drift away from
+    the measured coordinates a rate map is built in."""
+    res = np.array(list(maze.idealisation_residuals().values()))
+    assert res.max() < 0.25, "no node should move more than a quarter of an edge"
+    assert np.median(res) < 0.15
+
+
+def test_warp_maps_measured_nodes_onto_idealised_nodes():
+    G = maze.build_graph()
+    ideal = maze.idealised_positions(G)
+    df = maze.node_table()
+    df = df[df["id_str"].isin(ideal)]
+    wx, wy = maze.warp_to_idealised(df["x_m"].to_numpy(), df["y_m"].to_numpy())
+    target = np.array([ideal[s] for s in df["id_str"]])
+    # the spline interpolates the correspondences exactly
+    np.testing.assert_allclose(np.column_stack([wx, wy]), target, atol=1e-6)
+
+
+def test_warp_passes_nans_through():
+    wx, wy = maze.warp_to_idealised(np.array([np.nan, 4.0]), np.array([2.0, np.nan]))
+    assert np.isnan(wx[0]) and np.isnan(wy[0])
+    assert np.isnan(wx[1]) and np.isnan(wy[1])

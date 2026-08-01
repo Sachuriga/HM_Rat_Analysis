@@ -100,6 +100,107 @@ def build_graph():
     return G
 
 
+def idealised_positions(G=None, edge_len_m=None):
+    """Regular honeycomb coordinates for the maze nodes, in metres.
+
+    ``node_list_new.csv`` holds *measured* positions, so the drawn maze wobbles.
+    The real maze is a honeycomb: every edge runs at 0/60/120 degrees and spans a
+    whole number of ~0.4 m segments. This rebuilds the layout from the graph's own
+    topology — walk the edges from a root, snapping each one to the nearest
+    canonical direction and to a whole number of segments — then rigidly aligns
+    the result (translation only, so no scale or rotation is introduced) onto the
+    measured positions.
+
+    Returns ``{node_id_str: (x_m, y_m)}``. Because the fit is translation-only,
+    the result stays registered to the measured frame and anything already in
+    maze coordinates — a rate map, a trajectory — still overlays correctly.
+    """
+    G = build_graph() if G is None else G
+    if G.number_of_nodes() == 0:
+        return {}
+
+    real = {n: np.array([p[0] / SCALE_X, p[1] / SCALE_Y], float)
+            for n, p in nx.get_node_attributes(G, "pos").items()}
+
+    lengths = np.array([np.linalg.norm(real[v] - real[u]) for u, v in G.edges()])
+    if edge_len_m is None:
+        # the short edges are the lattice unit; long connectors are multiples
+        edge_len_m = float(np.median(lengths[lengths < 2 * np.median(lengths)]))
+
+    dirs = np.array([[np.cos(np.deg2rad(a)), np.sin(np.deg2rad(a))]
+                     for a in range(0, 360, 60)])
+
+    ideal = {}
+    for component in nx.connected_components(G):
+        root = min(component)
+        ideal[root] = np.zeros(2)
+        for parent, child in nx.bfs_edges(G.subgraph(component), root):
+            d = real[child] - real[parent]
+            dist = float(np.linalg.norm(d))
+            if dist == 0:
+                ideal[child] = ideal[parent].copy()
+                continue
+            unit = dirs[int(np.argmax(dirs @ (d / dist)))]
+            steps = max(1, int(round(dist / edge_len_m)))
+            ideal[child] = ideal[parent] + unit * edge_len_m * steps
+
+    # translation-only alignment back onto the measured frame
+    nodes = list(ideal)
+    shift = (np.mean([real[n] for n in nodes], axis=0)
+             - np.mean([ideal[n] for n in nodes], axis=0))
+    return {n: tuple(ideal[n] + shift) for n in nodes}
+
+
+def warp_to_idealised(x_m, y_m, G=None, smoothing=0.0):
+    """Map measured maze coordinates into the idealised frame.
+
+    Drawing the idealised maze under a rate map built in measured coordinates
+    leaves the two ~9 cm apart — a quarter of a corridor — so the firing lands
+    beside the corridor instead of on it. This carries the positions through the
+    same node-to-node correspondence (thin-plate spline through every node), so
+    the map and the drawn maze agree.
+
+    NaNs pass through as NaNs. Returns ``(x_ideal, y_ideal)``.
+    """
+    from scipy.interpolate import RBFInterpolator
+
+    G = build_graph() if G is None else G
+    ideal = idealised_positions(G)
+    real = {n: (p[0] / SCALE_X, p[1] / SCALE_Y)
+            for n, p in nx.get_node_attributes(G, "pos").items()}
+    nodes = [n for n in ideal if n in real]
+    if not nodes:
+        return np.asarray(x_m, float), np.asarray(y_m, float)
+
+    src = np.array([real[n] for n in nodes])
+    dst = np.array([ideal[n] for n in nodes])
+    spline = RBFInterpolator(src, dst, kernel="thin_plate_spline",
+                             smoothing=smoothing)
+
+    x = np.asarray(x_m, float)
+    y = np.asarray(y_m, float)
+    out_x = np.full(x.shape, np.nan)
+    out_y = np.full(y.shape, np.nan)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.any():
+        warped = spline(np.column_stack([x[ok], y[ok]]))
+        out_x[ok], out_y[ok] = warped[:, 0], warped[:, 1]
+    return out_x, out_y
+
+
+def idealisation_residuals(G=None):
+    """Per-node distance (m) between the idealised and measured layouts.
+
+    Small values mean the idealised maze can stand in for the measured one without
+    pulling the drawing off the data.
+    """
+    G = build_graph() if G is None else G
+    ideal = idealised_positions(G)
+    real = {n: np.array([p[0] / SCALE_X, p[1] / SCALE_Y], float)
+            for n, p in nx.get_node_attributes(G, "pos").items()}
+    return {n: float(np.linalg.norm(np.asarray(ideal[n]) - real[n])) for n in ideal}
+
+
 def shortest_path_segments(G, start_node, end_node, weight_mode="weight"):
     """Every shortest path from `start_node` to `end_node`, as drawable segments.
 
