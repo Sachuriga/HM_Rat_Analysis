@@ -127,10 +127,13 @@ def test_trial_report_cli_missing_folder_returns_error(tmp_path):
 
 # ----------------------------------------------------------- session summary
 def test_session_summary_end_to_end(nwb_root):
-    session_summary.run(nwb_root)
+    # min_spikes is relaxed: the synthetic units are far below the 100-spike floor
+    # the real report uses, and this test is about the plumbing, not the statistics.
+    pdf, xlsx = session_summary.run(nwb_root, min_spikes=0)
 
-    pdf = nwb_root / "session_summary.pdf"
-    xlsx = nwb_root / "session_summary.xlsx"
+    # the outputs are stamped with the parameters that produced them, so a 2.5 cm
+    # run cannot overwrite a 5 cm one
+    assert pdf.name == "session_summary_bin2.5cm_sm5cm_occ0.30s.pdf"
     assert pdf.stat().st_size > 0 and xlsx.exists()
 
     sessions = pd.read_excel(xlsx, "sessions")
@@ -142,16 +145,75 @@ def test_session_summary_end_to_end(nwb_root):
     assert sessions["n_fields"].notna().all()
     # the fixture's goal node is real, so field-to-goal distances resolve
     assert sessions["field_goal_m"].notna().all()
+    # the analysis parameters and the trial-window provenance are on every row
+    assert (sessions["bin_cm"] == 2.5).all() and (sessions["smooth_cm"] == 5.0).all()
+    assert (sessions["sigma_bins"] == 2.0).all()
+    # the fixture has no coordinate/seconds files, so build_trials would fall back
+    # to RecordingMeta times: the report must say so rather than trust them
+    assert (sessions["trial_windows"] == "recordingmeta_fallback").all()
 
     units = pd.read_excel(xlsx, "units")
     assert len(units) == 24                       # 6 good units x 4 sessions
     assert set(units["cell_type"]) <= {"pyramidal", "interneuron"}
+    # exposure columns travel with every unit row, or no confound can be checked
+    for col in ("n_spikes_epoch", "epoch_dur_s", "occ_total_s", "n_valid_bins"):
+        assert col in units.columns
+    pf = units[units["cell_type"] == "pyramidal"]
+    assert (pf["n_spikes_epoch"] > 0).any()
+
+    notes = pd.read_excel(xlsx, "notes").set_index("metric")["note"]
+    assert notes["spatial_info"] == "confounded_with_spike_count"
+    assert notes["spatial_info_matched"] in ("", None) or pd.isna(notes["spatial_info_matched"])
+
+
+def _parked_session(n_trials=10, run_n=300, park_n=900, dt=1 / 30.0):
+    """A session with the real inter-trial artifact: between trials the rat is
+    carried out and the series parks on the sentinel pixel (447, 303), reached by a
+    single-frame teleport in and out."""
+    from hm_rat_analysis import maze
+    sx, sy = 447 / maze.SCALE_X, 303 / maze.SCALE_Y
+    xs, ys, ts, wins, iti_spikes = [], [], [], [], []
+    now = 0.0
+    for _ in range(n_trials):
+        tr = np.arange(run_n) * dt + now
+        s = np.linspace(0, 1, run_n)
+        xs.append(1.0 + 6.0 * s); ys.append(0.6 + 3.4 * s); ts.append(tr)
+        wins.append((tr[0], tr[-1]))
+        now = tr[-1] + dt
+        tg = np.arange(park_n) * dt + now
+        xs.append(np.full(park_n, sx)); ys.append(np.full(park_n, sy)); ts.append(tg)
+        iti_spikes.append(tg[::10])            # a unit that fires ONLY off the maze
+        now = tg[-1] + dt
+    return (np.concatenate(xs), np.concatenate(ys), np.concatenate(ts),
+            wins, np.concatenate(iti_spikes), (sx, sy))
+
+
+def test_inter_trial_parking_never_reaches_the_rate_map():
+    """The sentinel pixel converts to maze node 318 — a point ON the graph, in a
+    corridor the rat really runs — so no geometric or occupancy filter can remove
+    it. Only the trial windows can, and the spikes must be windowed with them."""
+    from hm_rat_analysis import maze, place_fields
+    x, y, t, wins, st, sentinel = _parked_session()
+    dt = 1 / 30.0
+    windows = session_summary._merge_windows(wins)
+    px, py, pt, spd = session_summary._prep_positions(x, y, t, windows, dt)
+    kept = st[session_summary._in_windows(st, windows)]
+    assert kept.size == 0, "every spike here was emitted between trials"
+
+    bins = (360, 200)
+    m, rate, _ = place_fields.place_field_metrics(
+        px, py, pt, kept, maze.MAZE_EXTENT, bins, dt, sigma=2.0, speed_thresh=0.02,
+        speed=spd, min_occ_s=0.30)
+    ix = int((sentinel[0] - maze.MAZE_EXTENT[0]) / 9.0 * bins[0])
+    iy = int((sentinel[1] - maze.MAZE_EXTENT[2]) / 5.0 * bins[1])
+    assert np.ma.getmaskarray(rate)[iy, ix], "the parked bin must not be a valid bin"
+    assert m["n_spikes_epoch"] == 0
 
 
 def test_session_summary_on_empty_root_is_a_no_op(tmp_path, capsys):
     session_summary.run(tmp_path)
     assert "No .nwb files found" in capsys.readouterr().out
-    assert not (tmp_path / "session_summary.pdf").exists()
+    assert not list(tmp_path.glob("session_summary*.pdf"))
 
 
 def test_session_summary_cli(nwb_root):
