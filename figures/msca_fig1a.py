@@ -24,6 +24,11 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
+# Text stays TEXT in the PDF/SVG (TrueType, not outlines), so the figure can be
+# opened in a vector editor and its labels retyped rather than traced.
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"] = 42
+matplotlib.rcParams["svg.fonttype"] = "none"
 import matplotlib.patheffects as pe                               # noqa: E402
 import matplotlib.pyplot as plt                                   # noqa: E402
 import networkx as nx                                             # noqa: E402
@@ -42,6 +47,23 @@ MAZE_LINE = "#c9c8c2"
 
 ACG_FAST = (0.020, 0.0005, "± 20 ms")
 ACG_SLOW = (0.500, 0.005, "± 500 ms")
+
+#: Type sizes for panel a, in POINTS. Points are absolute on the page, so these do
+#: NOT scale with the figure: a 15-inch poster and a 17 cm A4 column want the same
+#: 8-11 pt text, and only the artwork around it changes size. PRINT_FONT is that
+#: band; FONT is the original poster sizing, kept as this script's own default so
+#: the standalone figure is unchanged.
+FONT = {"unit": 15, "goal": 13, "scale_bar": 11, "acg_unit": 11,
+        "acg_window": 8.5, "header": 10}
+PRINT_FONT = {"unit": 11, "goal": 10, "scale_bar": 9, "acg_unit": 8,
+              "acg_window": 8, "header": 9}
+
+#: Where the "goal N" caption sits relative to the star, in METRES: +x is right,
+#: +y is DOWN on the page (the maze is drawn y-inverted, see panel_maze). The
+#: default drops it into the open hexagon below-right of the goal, because the
+#: corridors around a goal node are exactly where the place fields are and a
+#: caption laid over them hides the data it is pointing at.
+GOAL_LABEL_OFFSET = (0.62, 1.20)
 
 
 # Named palettes. "turbo" is sampled at equal steps for however many units there
@@ -253,60 +275,81 @@ def break_jumps(xm, ym, max_step_m=0.45):
     return np.insert(x, cut, np.nan), np.insert(y, cut, np.nan)
 
 
-def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=3.2):
+def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=3.2,
+               rasterize=True, goal_label_offset=GOAL_LABEL_OFFSET,
+               scale=1.0, fonts=None):
+    """The maze, the trajectory and every unit's spikes.
+
+    `rasterize` keeps the two heavy layers — the trajectory and the spike clouds,
+    tens of thousands of marks — as an embedded image inside the vector page. Turn
+    it off for a fully editable vector figure, at the cost of a much larger file.
+
+    `scale` shrinks the ARTWORK — line widths, marker sizes, halos — for a smaller
+    page; it deliberately leaves `fonts` alone, because points are absolute and a
+    figure printed at 17 cm needs the same 8-11 pt text as one printed at 38 cm.
+    Marker areas scale as scale^2, since `s` is an area in pt^2 and only then does
+    a dot keep its size relative to the maze.
+    """
+    fonts = FONT if fonts is None else fonts
+    lw = lambda w: w * scale                  # noqa: E731 - widths are linear
+    area = lambda s: s * scale ** 2           # noqa: E731 - marker sizes are areas
+
     G = maze.build_graph()
     pos = maze.idealised_positions(G)       # regular lattice, not measured wobble
     for u, v in G.edges():
         ax.plot([pos[u][0], pos[v][0]], [pos[u][1], pos[v][1]],
-                color=MAZE_LINE, lw=2.4, zorder=1, solid_capstyle="round")
+                color=MAZE_LINE, lw=lw(2.4), zorder=1, solid_capstyle="round")
     pts = np.array(list(pos.values()))
-    ax.scatter(pts[:, 0], pts[:, 1], s=15, facecolor=SURFACE, edgecolor=MAZE_LINE,
-               linewidths=1.0, zorder=2)
+    ax.scatter(pts[:, 0], pts[:, 1], s=area(15), facecolor=SURFACE,
+               edgecolor=MAZE_LINE, linewidths=lw(1.0), zorder=2)
 
     if path_xy is not None:
         px, py = break_jumps(*path_xy)
-        ax.plot(px, py, color="#b7b6b0", lw=0.35, alpha=0.9, zorder=3,
-                rasterized=True, solid_joinstyle="round")
+        ax.plot(px, py, color="#b7b6b0", lw=lw(0.35), alpha=0.9, zorder=3,
+                rasterized=rasterize, solid_joinstyle="round")
 
     for i, lay in enumerate(layers):
         if lay.get("spikes") is not None and len(lay["spikes"][0]):
             sx, sy = lay["spikes"]
-            ax.scatter(sx, sy, s=spike_size, c=[to_hex(lay["rgb"])], linewidths=0,
-                       alpha=0.75, zorder=4 + i, rasterized=True)
+            ax.scatter(sx, sy, s=max(0.45, area(spike_size)), c=[to_hex(lay["rgb"])],
+                       linewidths=0, alpha=0.75, zorder=4 + i, rasterized=rasterize)
         if lay.get("mask") is not None:
             ax.contour(lay["mask"].astype(float), levels=[0.5],
                        extent=maze.MAZE_EXTENT, origin="lower",
                        colors=[to_hex(lay["rgb"])],
-                       linewidths=1.6, linestyles="solid", zorder=4 + i + 0.5)
+                       linewidths=lw(1.6), linestyles="solid", zorder=4 + i + 0.5)
 
     if goal_xy:
         # white rim so the star still reads where it sits on top of spikes
-        ax.scatter(*goal_xy, s=1150, marker="*", facecolor=INK,
-                   edgecolor=SURFACE, linewidths=2.0, zorder=21)
+        ax.scatter(*goal_xy, s=area(1150), marker="*", facecolor=INK,
+                   edgecolor=SURFACE, linewidths=lw(2.0), zorder=21)
+        dx, dy = goal_label_offset
         ax.annotate(f"goal {goal_node}", xy=goal_xy,
-                    xytext=(goal_xy[0] - 1.30, goal_xy[1] + 0.72),
-                    ha="center", color=INK, fontsize=13, fontweight="bold", zorder=22,
-                    arrowprops=dict(arrowstyle="-", color=INK, lw=1.4,
-                                    shrinkA=0, shrinkB=15))
+                    xytext=(goal_xy[0] + dx, goal_xy[1] + dy),
+                    ha="center", color=INK, fontsize=fonts["goal"],
+                    fontweight="bold", zorder=22,
+                    arrowprops=dict(arrowstyle="-", color=INK, lw=lw(1.4),
+                                    shrinkA=0, shrinkB=15 * scale))
 
-    halo = [pe.withStroke(linewidth=3.4, foreground=SURFACE)]
+    halo = [pe.withStroke(linewidth=lw(3.4), foreground=SURFACE)]
     for lay in layers:
         if lay.get("label_xy") is None:
             continue
         hue = to_hex(lay["rgb"])
         ax.annotate(str(lay["cid"]), xy=lay["anchor"], xytext=lay["label_xy"],
-                    ha="center", va="center", fontsize=15, fontweight="bold",
-                    color=hue, zorder=25, path_effects=halo,
-                    arrowprops=dict(arrowstyle="-", lw=1.2, shrinkA=2, shrinkB=2,
+                    ha="center", va="center", fontsize=fonts["unit"],
+                    fontweight="bold", color=hue, zorder=25, path_effects=halo,
+                    arrowprops=dict(arrowstyle="-", lw=lw(1.2), shrinkA=2, shrinkB=2,
                                     color=hue, alpha=0.75))
 
     xmin, xmax, ymin, ymax = bbox
     # y is inverted: tracker positions are video-pixel coordinates, where y grows
     # downwards. Drawing them y-up flips the maze relative to the room.
     x0, y0 = xmin + 0.12, ymax - 0.12
-    ax.plot([x0, x0 + 1], [y0, y0], color=INK, lw=3.0, solid_capstyle="butt", zorder=26)
-    ax.text(x0 + 0.5, y0 - 0.09, "1 m", ha="center", va="bottom", fontsize=11,
-            color=INK, fontweight="bold")
+    ax.plot([x0, x0 + 1], [y0, y0], color=INK, lw=lw(3.0), solid_capstyle="butt",
+            zorder=26)
+    ax.text(x0 + 0.5, y0 - 0.09, "1 m", ha="center", va="bottom",
+            fontsize=fonts["scale_bar"], color=INK, fontweight="bold")
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymax, ymin)
@@ -315,7 +358,7 @@ def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=3.2):
 
 
 def panel_acg(ax, counts, centres, window_ms, rgb, title=None, row_label=None,
-              fontsize=13, label_size=9.5):
+              fontsize=13, label_size=9.5, scale=1.0):
     width = (centres[1] - centres[0]) if len(centres) > 1 else 1.0
     ax.bar(centres, counts, width=width, color=to_hex(rgb), linewidth=0)
     ax.set_xlim(-window_ms, window_ms)
@@ -327,7 +370,7 @@ def panel_acg(ax, counts, centres, window_ms, rgb, title=None, row_label=None,
         s.set_visible(False)
     ax.spines["bottom"].set_visible(True)
     ax.spines["bottom"].set_color(MUTED)
-    ax.spines["bottom"].set_linewidth(0.8)
+    ax.spines["bottom"].set_linewidth(0.8 * scale)
     if title:
         ax.set_title(title, fontsize=fontsize, fontweight="bold", pad=2,
                      color=to_hex(rgb))
@@ -378,15 +421,16 @@ def empty_corner_boxes(G, pos, bbox, clearance=0.22, grid=(240, 140)):
             (1.0 - w_br, 0.0, w_br, h_br)]
 
 
-def inset_correlograms(ax, layers, boxes, pad=0.018):
+def inset_correlograms(ax, layers, boxes, pad=0.018, scale=1.0, fonts=None):
     """Tuck each unit's correlograms into the maze's empty corners.
 
     Units are split between the two boxes; each gets one row holding its two
     windows side by side, with its number in its own colour at the left.
     """
+    fonts = FONT if fonts is None else fonts
     n = len(layers)
     half = (n + 1) // 2
-    for box, group in zip(boxes, (layers[:half], layers[half:])):
+    for bi, (box, group) in enumerate(zip(boxes, (layers[:half], layers[half:]))):
         if not group:
             continue
         bx, by, bw, bh = box
@@ -401,8 +445,8 @@ def inset_correlograms(ax, layers, boxes, pad=0.018):
             ry = by + bh - (k + 1) * row_h
             ax.text(bx + lab_w * 0.72, ry + row_h * 0.45, str(lay["cid"]),
                     transform=ax.transAxes, ha="right", va="center",
-                    fontsize=11, fontweight="bold", color=to_hex(lay["rgb"]),
-                    zorder=30)
+                    fontsize=fonts["acg_unit"], fontweight="bold",
+                    color=to_hex(lay["rgb"]), zorder=30)
             for j, (counts, centres, window) in enumerate(
                     ((*lay["c_fast"], ACG_FAST[0] * 1000),
                      (*lay["c_slow"], ACG_SLOW[0] * 1000))):
@@ -410,17 +454,27 @@ def inset_correlograms(ax, layers, boxes, pad=0.018):
                                      ry + row_h * 0.12,
                                      cell_w * 0.88, row_h * 0.74])
                 sub.set_zorder(30)
-                panel_acg(sub, counts, centres, window, lay["rgb"])
-                if k == 0:
+                panel_acg(sub, counts, centres, window, lay["rgb"], scale=scale)
+                # The two windows are named ONCE, over the first box. The second box
+                # holds the same two columns in the same order, and its top edge is
+                # where a unit's own label often lands — two captions there collide
+                # with it on a small page and say nothing new.
+                if k == 0 and bi == 0:
                     ax.text(bx + lab_w + (j + 0.44) * cell_w, by + bh + 0.006,
                             ACG_FAST[2] if j == 0 else ACG_SLOW[2],
                             transform=ax.transAxes, ha="center", va="bottom",
-                            fontsize=8.5, color=INK2, zorder=30)
+                            fontsize=fonts["acg_window"], color=INK2, zorder=30)
 
 
-def build(nwb_path, units, out_stem, bin_cm=5.0, min_occ=0.25, sigma=1.0,
-          speed_thresh=0.025, gamma=2.0, field_frac=0.30,
-          min_field_bins=3, max_jitter=0.10, palette=DEFAULT_PALETTE):
+def load_session(nwb_path, units, bin_cm=5.0, min_occ=0.25, sigma=1.0,
+                 speed_thresh=0.025, gamma=2.0, field_frac=0.30,
+                 min_field_bins=3, max_jitter=0.10, palette=DEFAULT_PALETTE):
+    """Everything panel a needs from one session NWB, drawn by :func:`draw_panel_a`.
+
+    Kept apart from the drawing so the panel can be composed into a larger figure
+    (``figures/msca_fig1.py``) without reopening the NWB or duplicating any of the
+    rate-map conventions.
+    """
     io = NWBHDF5IO(str(nwb_path), "r", load_namespaces=True)
     try:
         nwb = io.read()
@@ -480,8 +534,31 @@ def build(nwb_path, units, out_stem, bin_cm=5.0, min_occ=0.25, sigma=1.0,
 
     bbox = maze_bbox(nodes_m)
     place_labels(layers, bbox)
+    return dict(layers=layers, path=(xm, ym), goal_xy=goal_xy, goal_node=goal_node,
+                bbox=bbox, animal=animal, date=date)
 
-    n = len(units)
+
+def draw_panel_a(ax, data, rasterize=True, goal_label_offset=GOAL_LABEL_OFFSET,
+                 scale=1.0, fonts=None):
+    """Panel a \u2014 every unit's spikes on the idealised maze, correlograms inset."""
+    panel_maze(ax, data["layers"], data["path"], data["goal_xy"], data["goal_node"],
+               data["bbox"], rasterize=rasterize,
+               goal_label_offset=goal_label_offset, scale=scale, fonts=fonts)
+    G = maze.build_graph()
+    boxes = empty_corner_boxes(G, maze.idealised_positions(G), data["bbox"])
+    inset_correlograms(ax, data["layers"], boxes, scale=scale, fonts=fonts)
+
+
+def build(nwb_path, units, out_stem, bin_cm=5.0, min_occ=0.25, sigma=1.0,
+          speed_thresh=0.025, gamma=2.0, field_frac=0.30,
+          min_field_bins=3, max_jitter=0.10, palette=DEFAULT_PALETTE,
+          goal_label_offset=GOAL_LABEL_OFFSET):
+    data = load_session(nwb_path, units, bin_cm=bin_cm, min_occ=min_occ, sigma=sigma,
+                        speed_thresh=speed_thresh, gamma=gamma, field_frac=field_frac,
+                        min_field_bins=min_field_bins, max_jitter=max_jitter,
+                        palette=palette)
+    bbox = data["bbox"]
+
     width = 15.0
     left, right, top, bottom = 0.005, 0.995, 0.965, 0.01
     maze_aspect = (bbox[1] - bbox[0]) / (bbox[3] - bbox[2])
@@ -490,13 +567,10 @@ def build(nwb_path, units, out_stem, bin_cm=5.0, min_occ=0.25, sigma=1.0,
 
     fig = plt.figure(figsize=(width, height), facecolor=SURFACE)
     ax = fig.add_axes([left, bottom, right - left, top - bottom])
-    panel_maze(ax, layers, (xm, ym), goal_xy, goal_node, bbox)
+    draw_panel_a(ax, data, goal_label_offset=goal_label_offset)
 
-    G = maze.build_graph()
-    boxes = empty_corner_boxes(G, maze.idealised_positions(G), bbox)
-    inset_correlograms(ax, layers, boxes)
-
-    fig.text(left + 0.004, 0.982, f"Rat {animal}  \u00b7  {date}", fontsize=10, color=INK2)
+    fig.text(left + 0.004, 0.982, f"Rat {data['animal']}  \u00b7  {data['date']}",
+             fontsize=10, color=INK2)
 
     out_stem = Path(out_stem)
     out_stem.parent.mkdir(parents=True, exist_ok=True)
@@ -526,6 +600,11 @@ def main(argv=None):
     ap.add_argument("--palette", default=DEFAULT_PALETTE,
                     choices=["turbo"] + sorted(FIXED_PALETTES),
                     help="unit colours (default: equal steps along Turbo)")
+    ap.add_argument("--goal-label", type=float, nargs=2, metavar=("DX", "DY"),
+                    default=list(GOAL_LABEL_OFFSET),
+                    help="where the 'goal N' caption sits relative to the star, in "
+                         "metres: +DX right, +DY DOWN the page (default "
+                         f"{GOAL_LABEL_OFFSET[0]:g} {GOAL_LABEL_OFFSET[1]:g})")
     ap.add_argument("--max-jitter", type=float, default=0.10,
                     help="spike scatter at a unit's peak rate, in metres")
     ap.add_argument("--gamma", type=float, default=2.0,
@@ -534,7 +613,7 @@ def main(argv=None):
     build(a.nwb, a.units, a.out, bin_cm=a.bin_cm, min_occ=a.min_occ, sigma=a.sigma,
           speed_thresh=a.speed, gamma=a.gamma, field_frac=a.field_frac,
           min_field_bins=a.min_field_bins, max_jitter=a.max_jitter,
-          palette=a.palette)
+          palette=a.palette, goal_label_offset=tuple(a.goal_label))
     return 0
 
 

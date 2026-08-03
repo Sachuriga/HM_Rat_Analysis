@@ -186,3 +186,167 @@ def test_place_field_mask_picks_the_peak_region():
     assert mask is not None and mask.any()
     peak_idx = np.unravel_index(np.ma.argmax(rate), rate.shape)
     assert mask[peak_idx], "the mask must contain the peak bin"
+
+
+# ------------------------------------------------------------ split-half stability
+def _two_half_session(n=12000, drift_m=0.0):
+    """A back-and-forth run over the maze with a cell firing at one place, whose
+    field is displaced by `drift_m` in the second half of the session."""
+    t = np.arange(n) * DT
+    s = np.abs(((np.arange(n) / 900.0) % 2.0) - 1.0)
+    x = 1.0 + 6.0 * s
+    y = 0.6 + 3.4 * s
+    half = n // 2
+    cx = np.where(np.arange(n) < half, 4.0, 4.0 + drift_m)
+    cy = np.where(np.arange(n) < half, 2.0, 2.0 + drift_m * 3.4 / 6.0)
+    return x, y, t, t[np.hypot(x - cx, y - cy) < 0.35]
+
+
+def test_stability_separates_a_repeating_map_from_a_drifting_one():
+    """The number the split-half correlation exists to make: same field in both
+    halves -> high r; a field that moved -> low r, on identical spike counts."""
+    kw = dict(sigma=1.0, speed_thresh=0.0, min_occ_s=0.30)
+    stable, _, _ = place_fields.place_field_metrics(
+        *_two_half_session(drift_m=0.0), EXTENT, (180, 100), DT, **kw)
+    drifted, _, _ = place_fields.place_field_metrics(
+        *_two_half_session(drift_m=2.0), EXTENT, (180, 100), DT, **kw)
+    assert stable["stability"] > 0.8
+    assert drifted["stability"] < stable["stability"] - 0.3
+    assert stable["stability_n_bins"] >= place_fields.DEFAULT_MIN_STABILITY_BINS
+
+
+def test_stability_splits_on_alternate_trials_when_windows_are_given():
+    """With trial windows the halves are alternate TRIALS, not first/second half —
+    the two are not interchangeable when coverage changes within a session."""
+    x, y, t, spikes = _two_half_session()
+    wins = [(float(a), float(a + 20.0)) for a in np.arange(0, t[-1] - 20.0, 20.0)]
+    m, _, _ = place_fields.place_field_metrics(
+        x, y, t, spikes, EXTENT, (180, 100), DT, sigma=1.0, speed_thresh=0.0,
+        min_occ_s=0.30, stability_windows=wins)
+    assert m["stability_split"] == "alternate_trials"
+    assert np.isfinite(m["stability"])
+
+    m2, _, _ = place_fields.place_field_metrics(
+        x, y, t, spikes, EXTENT, (180, 100), DT, sigma=1.0, speed_thresh=0.0,
+        min_occ_s=0.30)
+    assert m2["stability_split"] == "time_halves"
+
+
+def test_stability_of_a_silent_cell_is_nan_not_zero():
+    x, y, t, _ = _two_half_session()
+    r, n, split = place_fields.split_half_stability(
+        x, y, t, np.array([]), EXTENT, (180, 100), DT, 1.0, min_occ_s=0.30)
+    assert np.isnan(r), "no spikes -> no map to correlate, not r = 0"
+    assert split == "time_halves" and n >= 0
+
+
+def test_field_size_in_cm_survives_halving_the_bin_size():
+    """Field size is quoted in track cm precisely because the area is not
+    bin-size invariant on a corridor narrower than one bin."""
+    x, y, t, spikes = _two_half_session()
+    out = {}
+    for bins, sigma in (((180, 100), 1.0), ((360, 200), 2.0)):
+        m, _, _ = place_fields.place_field_metrics(
+            x, y, t, spikes, EXTENT, bins, DT, sigma=sigma, speed_thresh=0.0,
+            min_occ_s=0.30)
+        out[bins] = m
+    coarse, fine = out[(180, 100)], out[(360, 200)]
+    assert fine["field_size_mean_cm"] == pytest.approx(
+        coarse["field_size_mean_cm"], rel=0.25)
+    # the area spelling of the same fields does NOT survive the same change
+    assert fine["field_size_largest_m2"] < coarse["field_size_largest_m2"] * 0.75
+
+
+# ------------------------------------------------- trial-to-reference divergence
+def _occs(x, y, t, windows, bins=(180, 100), sigma=1.0):
+    return [place_fields.occupancy_parts(x, y, t, EXTENT, bins, DT, sigma,
+                                         t0=a, t1=b) for a, b in windows]
+
+
+def _trial_session(n=18000, drift_from=None, drift_m=2.0, trial_s=20.0):
+    """A back-and-forth run cut into trials, with the cell's field optionally
+    jumping to a new place from `drift_from` onwards."""
+    t = np.arange(n) * DT
+    s = np.abs(((np.arange(n) / 900.0) % 2.0) - 1.0)
+    x = 1.0 + 6.0 * s
+    y = 0.6 + 3.4 * s
+    wins = [(k * trial_s, (k + 1) * trial_s - 0.5)
+            for k in range(int(t[-1] // trial_s))]
+    moved = np.zeros(n, bool)
+    if drift_from is not None:
+        moved = t >= wins[drift_from][0]
+    cx = np.where(moved, 4.0 + drift_m, 4.0)
+    cy = np.where(moved, 2.0 + drift_m * 3.4 / 6.0, 2.0)
+    return x, y, t, t[np.hypot(x - cx, y - cy) < 0.35], wins
+
+
+def test_poisson_kl_is_zero_for_a_map_against_itself():
+    """The estimator's fixed point: no change, no divergence."""
+    x, y, t, spikes, wins = _trial_session()
+    m, rate, _ = place_fields.place_field_metrics(
+        x, y, t, spikes, EXTENT, (180, 100), DT, sigma=1.0, speed_thresh=0.0,
+        min_occ_s=0.30)
+    tot, per, n = place_fields.poisson_kl_bits(rate, rate)
+    assert n > 20
+    assert tot == pytest.approx(0.0, abs=1e-9)
+    assert per == pytest.approx(0.0, abs=1e-12)
+
+
+def test_divergence_rises_when_the_field_moves_and_stays_low_when_it_does_not():
+    """The measure the paper uses it for: a map that jumps mid-session shows it."""
+    stable = _trial_session()
+    drifting = _trial_session(drift_from=5)
+    out = {}
+    for name, (x, y, t, spikes, wins) in (("stable", stable), ("drift", drifting)):
+        occs = _occs(x, y, t, wins)
+        rows = place_fields.trial_divergence(occs, spikes, sigma=1.0, min_occ_s=0.30)
+        out[name] = np.array([r["kl_bits_per_bin"] for r in rows], float)
+    assert np.nanmedian(out["drift"]) > np.nanmedian(out["stable"])
+    # and the cumulative slope, which is what the paper reports per cell
+    assert (place_fields.cumulative_kl_slope(out["drift"])
+            > place_fields.cumulative_kl_slope(out["stable"]))
+
+
+def test_divergence_only_counts_bins_visited_in_both_maps():
+    """A bin entered on one trial and not the other is an occupancy difference,
+    not a change in firing, and must not enter the sum."""
+    x, y, t, spikes, wins = _trial_session()
+    occs = _occs(x, y, t, wins)
+    rows = place_fields.trial_divergence(occs, spikes, sigma=1.0, min_occ_s=0.30)
+    per_trial_bins = [r["kl_n_bins"] for r in rows if np.isfinite(r["kl_bits"])]
+    assert per_trial_bins, "no trial cleared the co-visited floor"
+    m, rate, _ = place_fields.place_field_metrics(
+        x, y, t, spikes, EXTENT, (180, 100), DT, sigma=1.0, speed_thresh=0.0,
+        min_occ_s=0.30)
+    assert max(per_trial_bins) <= int(rate.count()), "more bins than the session has"
+
+
+def test_a_thin_overlap_is_nan_rather_than_a_noisy_number():
+    x, y, t, spikes, wins = _trial_session()
+    occs = _occs(x, y, t, wins)
+    rows = place_fields.trial_divergence(occs, spikes, sigma=1.0, min_occ_s=0.30,
+                                         min_bins=10_000)
+    assert all(np.isnan(r["kl_bits"]) for r in rows)
+    assert all(r["kl_n_bins"] > 0 for r in rows), "the count is still reported"
+
+
+def test_free_roam_reference_uses_only_the_free_roam_trials():
+    """The goal-independent reference: built from the named trials, and never from
+    the trial being scored."""
+    x, y, t, spikes, wins = _trial_session()
+    occs = _occs(x, y, t, wins)
+    rows = place_fields.trial_divergence(occs, spikes, sigma=1.0, min_occ_s=0.30,
+                                         reference="freeroam", free_roam=[0, 1])
+    assert np.isfinite([r["kl_bits"] for r in rows]).any()
+    # with no free-roaming trials there is no reference, and it says so
+    none = place_fields.trial_divergence(occs, spikes, sigma=1.0, min_occ_s=0.30,
+                                         reference="freeroam", free_roam=[])
+    assert all(np.isnan(r["kl_bits"]) for r in none)
+    assert all(r["n_spikes_trial"] >= 0 for r in none)
+
+
+def test_cumulative_slope_needs_two_points():
+    assert np.isnan(place_fields.cumulative_kl_slope([1.0]))
+    assert np.isnan(place_fields.cumulative_kl_slope([np.nan, np.nan]))
+    # a constant per-trial divergence gives a straight cumulative line
+    assert place_fields.cumulative_kl_slope([2.0] * 5) == pytest.approx(2.0)

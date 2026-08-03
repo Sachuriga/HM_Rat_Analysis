@@ -6,9 +6,11 @@ steps w/u), groups them by animal (NWB subject_id), and for each animal plots �
 a function of session date (labelled with Repeat & Session) —:
   - number of GOOD and MUA units
   - among GOOD units, number of pyramidal vs interneuron
+  - behavioural performance, log10(shortest hops / actual hops) per trial
   - pyramidal spatial information (Skaggs, bits/spike)
   - pyramidal selectivity (peak/mean rate)
-  - pyramidal number of place fields
+  - pyramidal map stability (alternate-trial split-half correlation)
+  - pyramidal number of place fields and mean field size (cm of track)
   - pyramidal mean place-field distance to the goal node (m)
 
 Cell type + waveform metrics are read from the NWB when step u stored them, else
@@ -83,16 +85,20 @@ def _log(msg):
 # data — which is what would make every sampling confound below unfixable after
 # the fact rather than merely present.
 _PF_METRICS = ("spatial_info", "spatial_info_matched", "selectivity", "peak",
-               "n_fields", "field_goal_m", "field_goal_null_m", "field_goal_over_null",
+               "stability", "n_fields", "field_size_mean_cm",
+               "field_goal_m", "field_goal_null_m", "field_goal_over_null",
                "field_goal_largest_m", "field_goal_2ndlargest_m",
                "field_goal_smallest_m", "field_size_largest_m2")
-_PF_EXPOSURE = ("n_spikes_epoch", "epoch_dur_s", "occ_total_s", "n_valid_bins")
+_PF_EXPOSURE = ("n_spikes_epoch", "epoch_dur_s", "occ_total_s", "n_valid_bins",
+                "stability_n_bins")
 _PF_KEYS = _PF_METRICS + _PF_EXPOSURE
 _PF_PLOT = [("spatial_info", "pyramidal spatial information", "bits/spike"),
             ("spatial_info_matched", "spatial information, spike-count matched", "bits/spike"),
             ("selectivity", "pyramidal selectivity", "peak/mean"),
             ("peak", "pyramidal peak rate", "Hz"),
+            ("stability", "map stability (alternate trials)", "Pearson r"),
             ("n_fields", "pyramidal # place fields", "n fields"),
+            ("field_size_mean_cm", "mean place-field size", "cm of track"),
             ("field_goal_m", "field-to-goal (mean of all fields)", "metres"),
             ("field_goal_over_null", "field-to-goal / occupancy-matched null", "ratio"),
             ("field_goal_largest_m", "field-to-goal (largest field)", "metres"),
@@ -107,11 +113,16 @@ _PF_PLOT = [("spatial_info", "pyramidal spatial information", "bits/spike"),
 _PANEL_NOTE = {"spatial_info": "biased by spike count — read the matched panel",
                "selectivity": "peak & mean move in opposite directions with sampling",
                "peak": "biased upward when data are sparse; sets the field threshold",
+               "stability": "each half holds half the spikes — falls with session length",
                "n_fields": "bounded by coverage (see coverage panel)",
+               "field_size_mean_cm": "bounded by coverage; length, not area (bin-invariant)",
                "field_goal_m": "bounded by coverage",
                "field_goal_largest_m": "bounded by coverage",
                "field_goal_2ndlargest_m": "only cells with >=2 fields contribute",
                "field_goal_smallest_m": "smallest field is the sampling speck"}
+#: Metrics that can legitimately be negative, so their panels must not be clamped
+#: to y >= 0 the way counts and rates are.
+_SIGNED_METRICS = frozenset({"stability"})
 # 3-way subtype colours for the cell-type scatter
 SUBTYPE_COLORS = {"pyramidal": "#2166ac",            # blue
                   "narrow interneuron": "#d62728",   # red
@@ -203,6 +214,196 @@ def _decode_accuracy(session_dir):
             except Exception:
                 pass
     return out
+
+
+#: Goal-directed trial type. Types 4/5 are free-roaming/goal-switch trials, where
+#: "shortest path to the goal" is not what the animal was asked to do, so they are
+#: scored (the column is there) but kept out of the session's headline number.
+GOAL_TRIAL_TYPE = 1
+
+
+def _session_performance(session_dir, base):
+    """Behavioural performance for one session: the median over its GOAL-DIRECTED
+    trials of log10(shortest hops / actual hops), plus the per-trial rows.
+
+    The median, not the mean: one lost trial where the rat wandered for fifty hops
+    is a far larger excursion in log-efficiency than a good trial is in the other
+    direction, so a mean tracks the worst trial of the day rather than the day.
+    """
+    out = {"performance_med": np.nan, "performance_n_trials": 0,
+           "performance_trial_type": GOAL_TRIAL_TYPE, "trial_rows": None}
+    try:
+        tp = behaviour.trial_performance(session_dir)
+    except Exception as e:
+        _log(f"    performance unavailable ({e}).")
+        return out
+    if tp.empty:
+        return out
+    for k in ("animal", "date", "repeat", "session"):
+        tp[k] = base.get(k)
+    out["trial_rows"] = tp
+    goal = tp[tp["trial_type"] == GOAL_TRIAL_TYPE]
+    if not goal["performance"].notna().any():
+        # No trial is typed 1 (older metadata sheets leave Trial_Type blank): fall
+        # back to every scored trial and SAY so, because the two populations are
+        # not the same measurement.
+        goal = tp
+        out["performance_trial_type"] = -1
+    v = pd.to_numeric(goal["performance"], errors="coerce").dropna()
+    out["performance_med"] = float(v.median()) if len(v) else np.nan
+    out["performance_n_trials"] = int(len(v))
+    return out
+
+
+#: The references a per-trial map divergence is measured against. Both are
+#: computed because they answer different questions: `template` is internal
+#: consistency (does this trial's map match the rest of the day), `freeroam` is
+#: drift from a GOAL-INDEPENDENT baseline — the free-roaming trials are ~600 s
+#: each and cover 71-79% of the ground a session covers, and unlike the day's own
+#: template that baseline does not move as the animal learns the goal.
+KL_REFERENCES = ("template", "freeroam")
+
+
+def _trial_divergence(occs, trials_meta, udf, pyr_idx, base, sigma, min_occ_s,
+                      min_spikes=0):
+    """Per-(trial, unit) map divergence, both references, for one session.
+
+    Occupancy is computed ONCE per trial by the caller and shared across cells —
+    it does not depend on which neuron is being scored, and with 33 trials and 84
+    pyramidal cells the naive version would repeat that work 2772 times.
+
+    Free-roaming trials are scored too, rather than skipped. They are the control:
+    a normal free-roam trial should not move the map, so if their divergence sits
+    with the goal trials' the measure is reading the map, and if it sits above
+    them the measure is reading how far the animal walked.
+    """
+    free_roam = [i for i, tt in enumerate(trials_meta)
+                 if tt in PF.FREE_ROAM_TRIAL_TYPES]
+    rows = []
+    for idx in pyr_idx:
+        st = np.asarray(udf.loc[idx, "spike_times"], dtype=float)
+        uid = int(udf.loc[idx, "phy_cluster_id"]) if "phy_cluster_id" in udf.columns else int(idx)
+        per_ref = {ref: PF.trial_divergence(occs, st, sigma, min_occ_s=min_occ_s,
+                                            reference=ref, free_roam=free_roam)
+                   for ref in KL_REFERENCES}
+        for k, tt in enumerate(trials_meta):
+            r = {**base, "unit_id": uid, "trial": k + 1, "trial_type": tt,
+                 "n_spikes_trial": per_ref[KL_REFERENCES[0]][k]["n_spikes_trial"]}
+            for ref in KL_REFERENCES:
+                d = per_ref[ref][k]
+                # A trial below the spike floor gets NaN, not a number computed
+                # from a handful of spikes — the same rule the other metrics use.
+                thin = d["n_spikes_trial"] < int(min_spikes)
+                r[f"kl_{ref}_bits"] = np.nan if thin else d["kl_bits"]
+                r[f"kl_{ref}_per_bin"] = np.nan if thin else d["kl_bits_per_bin"]
+                r[f"kl_{ref}_n_bins"] = d["kl_n_bins"]
+            rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def _kl_unit_slopes(div, base):
+    """Per-(unit, reference) cumulative-divergence slope over the day — the
+    paper's per-cell statistic for how fast a map is changing. Goal trials only:
+    a free-roaming trial interposed in the sequence is a different behaviour, and
+    letting it into the cumulative curve would put a step in it that has nothing
+    to do with the rate of change between goal trials."""
+    if div is None or div.empty:
+        return pd.DataFrame()
+    goal = div[div["trial_type"] == GOAL_TRIAL_TYPE].sort_values(["unit_id", "trial"])
+    rows = []
+    for uid, sub in goal.groupby("unit_id"):
+        r = {**base, "unit_id": int(uid), "n_trials": int(len(sub))}
+        for ref in KL_REFERENCES:
+            v = pd.to_numeric(sub[f"kl_{ref}_per_bin"], errors="coerce").to_numpy()
+            r[f"kl_{ref}_slope"] = PF.cumulative_kl_slope(v)
+            r[f"kl_{ref}_med"] = float(np.nanmedian(v)) if np.isfinite(v).any() else np.nan
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+#: Fraction of a session's pyramidal cells the count-matched SI should be built
+#: from, in EVERY session, when the matching count is chosen automatically.
+SI_MATCH_TARGET_FRAC = 0.90
+
+
+def epoch_spike_counts(nwb_path, speed=0.02, smooth_cm=5.0, bin_cm=2.5):
+    """Gated in-trial spike count per pyramidal cell — the cheap pre-pass that lets
+    the count-matched SI threshold be chosen from the data.
+
+    Same window, speed gate and interpolation rule the rate maps use, so a cell
+    counted here is a cell that would contribute there. No rate maps are built:
+    this is the count only, and it costs a fraction of a second per session on top
+    of reading the file.
+    """
+    io = NWBHDF5IO(str(nwb_path), mode="r", load_namespaces=False)
+    try:
+        nwb = io.read()
+        if nwb.units is None or len(nwb.units.id) == 0:
+            return np.array([])
+        udf = nwb.units.to_dataframe()
+        ql = udf["quality_label"].astype(str) if "quality_label" in udf else pd.Series("good", index=udf.index)
+        ct = udf["cell_type"].astype(str) if "cell_type" in udf else pd.Series("pyramidal", index=udf.index)
+        pyr = udf.index[(ql == "good") & (ct == "pyramidal")]
+        pos = nwbio.load_position(nwb)
+        if pos is None or not len(pyr):
+            return np.array([])
+        _trials, windows, tsrc = _trial_windows(nwb_path.parent, nwb, pos[2])
+        if tsrc != "build_trials" or not windows:
+            return np.array([])
+        t_raw = pos[2]
+        dt = float(np.median(np.diff(t_raw))) if t_raw.size > 1 else 1.0 / 30
+        prep = _prep_positions(pos[0] / maze.SCALE_X, pos[1] / maze.SCALE_Y,
+                               t_raw, windows, dt)
+        if prep is None:
+            return np.array([])
+        x, y, t, spd = prep
+        ext = maze.MAZE_EXTENT
+        bm = bin_cm / 100.0
+        bins = (max(5, int(round((ext[1] - ext[0]) / bm))),
+                max(5, int(round((ext[3] - ext[2]) / bm))))
+        sigma = float(smooth_cm) / PF.bin_size_cm(ext, bins)[0]
+        occ = PF.occupancy_parts(x, y, t, ext, bins, dt, sigma, speed_thresh=speed,
+                                 speed=spd)
+        if occ is None:
+            return np.array([])
+        out = []
+        for idx in pyr:
+            st = np.asarray(udf.loc[idx, "spike_times"], dtype=float)
+            st = st[_in_windows(st, windows)]
+            out.append(PF.spike_parts(occ, st)[1].size)
+        return np.array(out, dtype=float)
+    finally:
+        try:
+            io.close()
+        except Exception:
+            pass
+
+
+def choose_si_match_n(counts_by_session, target_frac=SI_MATCH_TARGET_FRAC,
+                      floor=50):
+    """The largest spike count at which `target_frac` of the cells qualify in EVERY
+    session — one number for the whole dataset, not one per session.
+
+    A fixed 300 makes the count-matched SI comparable in the ESTIMATOR (every cell
+    is thinned to the same number) but not in the POPULATION: as trials shorten
+    with learning, fewer cells clear it (measured: 75 cells down to 28), and which
+    cells clear it changes too. On this dataset the survivors are the high-firing
+    cells, whose SI is lower (within-session rho -0.57), so the drift works against
+    the observed rise rather than producing it — but it is still a moving
+    population, and the fix is to pick a count every session can supply.
+
+    One count for all sessions is the whole point: SI at 300 spikes is not
+    comparable with SI at 100, so a per-session threshold would reintroduce exactly
+    the bias being removed.
+    """
+    per = [np.asarray(c, float) for c in counts_by_session if len(c)]
+    if not per:
+        return None, np.nan
+    # the count each session can supply to target_frac of its own cells...
+    supply = [np.quantile(c, 1.0 - target_frac) for c in per]
+    n = int(max(floor, np.floor(min(supply))))        # ...and the binding session
+    frac = float(np.mean([(c >= n).mean() for c in per]))
+    return n, frac
 
 
 def _session_goal(nwb, udf):
@@ -318,7 +519,8 @@ def _prep_positions(x, y, t, windows, dt):
 def collect_session(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
                     field_frac=PF.DEFAULT_FIELD_FRAC, min_field_cm=PF.DEFAULT_MIN_FIELD_CM,
                     min_occ_s=PF.DEFAULT_MIN_OCC_S, min_peak_hz=PF.DEFAULT_MIN_PEAK_HZ,
-                    min_spikes=100, si_match_n=300, si_match_repeats=20, seed=0):
+                    min_spikes=100, si_match_n=300, si_match_repeats=20, seed=0,
+                    kl=True):
     """Return a dict of per-session summary stats, or None on failure."""
     # load_namespaces=True re-opens the file to read its cached spec, and on an SMB
     # mount that second handle fails to close ("Bad file descriptor", errno 9),
@@ -352,6 +554,13 @@ def collect_session(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
                # of the figure has this denominator, and it moves with the data
                "n_pf_units": 0, "n_pf_units_post": 0,
                "trial_windows": "no_position", "n_trials": 0, "trial_time_s": np.nan,
+               "performance_med": np.nan, "performance_n_trials": 0,
+               "performance_trial_type": GOAL_TRIAL_TYPE, "trial_rows": None,
+               "trial_divergence": None, "kl_unit_slopes": None,
+               "kl_spikes_per_trial": np.nan,
+               "si_match_n_used": np.nan, "si_match_frac": np.nan,
+               **{f"kl_{r}_{k}": np.nan for r in KL_REFERENCES
+                  for k in ("per_bin", "mean", "slope")},
                "bin_cm": float(bin_cm), "smooth_cm": float(smooth_cm),
                "sigma_bins": np.nan, "min_occ_s": float(min_occ_s),
                "field_frac": float(field_frac), "min_field_cm": float(min_field_cm),
@@ -388,6 +597,7 @@ def collect_session(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
         out["trial_windows"] = tsrc
         out["n_trials"] = len(windows)
         out["trial_time_s"] = float(sum(b - a for a, b in windows)) if windows else np.nan
+        out.update(_session_performance(nwb_path.parent, out))
 
         um = _unit_metrics(nwb, udf, windows=windows)
         udf["cell_type"] = um["cell_type"]
@@ -427,6 +637,7 @@ def collect_session(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
                              f"({smooth_cm} cm / {bx_cm:.3f} cm): below ~0.75 the map "
                              "is aliased, above ~6 it is over-smoothed — pick a "
                              "bin_cm/smooth_cm pair in between")
+        out["si_match_n_used"] = float(si_match_n) if si_match_n else np.nan
         out["bin_cm"] = bx_cm; out["smooth_cm"] = float(smooth_cm)
         out["sigma_bins"] = sigma; out["min_occ_s"] = float(min_occ_s)
         out["field_frac"] = float(field_frac); out["min_field_cm"] = float(min_field_cm)
@@ -473,7 +684,8 @@ def collect_session(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
                     t0=t0, t1=t1, field_frac=field_frac, min_peak_hz=min_peak_hz,
                     min_field_cm=min_field_cm, min_occ_s=min_occ_s, speed=spd,
                     min_spikes=min_spikes, si_match_n=si_match_n,
-                    si_match_repeats=si_match_repeats, seed=seed)
+                    si_match_repeats=si_match_repeats, seed=seed,
+                    stability_windows=windows)
                 d = _base(idx); d["epoch"] = epoch; d["goal_node"] = goal_node
                 for k in _PF_KEYS:
                     d[k] = m[k]; vals[k].append(m[k])
@@ -511,6 +723,44 @@ def collect_session(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
             for k in _PF_KEYS:
                 out[k] = whole[k]
             out["n_pf_units"] = whole["n_pf_units"]
+        # the audit trail for the population objection: what FRACTION of the
+        # pyramidal cells actually reached the count-matched column this session
+        if pyr_idx:
+            got = np.isfinite([r.get("spatial_info_matched", np.nan)
+                               for r in unit_rows if r["cell_type"] == "pyramidal"])
+            out["si_match_frac"] = float(np.mean(got)) if got.size else np.nan
+
+        # Per-trial map divergence (Quattrocolo et al.'s KL stability), against
+        # both references. Skipped when the trial windows are not trustworthy:
+        # a per-trial measure built on misplaced trial boundaries is worse than
+        # no measure, because it looks like data.
+        if kl and tsrc == "build_trials" and windows:
+            occs = [PF.occupancy_parts(x, y, t, ext, bins, dt, sigma, t0=a, t1=b,
+                                       speed_thresh=speed, speed=spd)
+                    for a, b in windows]
+            keep = [i for i, o in enumerate(occs) if o is not None]
+            if keep:
+                tmeta = [tr[0] for tr in trials][:len(windows)]
+                base = {"animal": out["animal"], "date": date, "repeat": repeat,
+                        "session": session}
+                div = _trial_divergence([occs[i] for i in keep],
+                                        [tmeta[i] for i in keep], udf, pyr_idx,
+                                        base, sigma, min_occ_s, min_spikes=0)
+                out["trial_divergence"] = div
+                out["kl_unit_slopes"] = _kl_unit_slopes(div, base)
+                goal = div[div["trial_type"] == GOAL_TRIAL_TYPE]
+                out["kl_spikes_per_trial"] = (float(goal["n_spikes_trial"].median())
+                                              if len(goal) else np.nan)
+                for ref in KL_REFERENCES:
+                    v = pd.to_numeric(goal[f"kl_{ref}_per_bin"], errors="coerce")
+                    # Median AND mean: the per-trial distribution is right-skewed
+                    # (mean/median ~1.3 on this dataset), so they are not
+                    # interchangeable and the one being quoted has to be named.
+                    out[f"kl_{ref}_per_bin"] = float(v.median()) if v.notna().any() else np.nan
+                    out[f"kl_{ref}_mean"] = float(v.mean()) if v.notna().any() else np.nan
+                    s = out["kl_unit_slopes"]
+                    sv = pd.to_numeric(s[f"kl_{ref}_slope"], errors="coerce") if not s.empty else pd.Series(dtype=float)
+                    out[f"kl_{ref}_slope"] = float(sv.median()) if sv.notna().any() else np.nan
 
         # interneuron good units: one datapoint row each (no place fields)
         for idx in good.index[good["cell_type"] != "pyramidal"]:
@@ -550,8 +800,8 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
         return np.array([s.get(key) if s.get(key) is not None else np.nan
                          for s in sessions], dtype=float)
 
-    # one panel per plotted metric, plus the two unit-count bars and decoding
-    nrow = int(np.ceil((len(_PF_PLOT) + 3) / 2))
+    # one panel per plotted metric, plus the two unit-count bars, behaviour and decoding
+    nrow = int(np.ceil((len(_PF_PLOT) + 4) / 2))
     fig, axes = plt.subplots(nrow, 2, figsize=(11, 3.6 * nrow))
     flat = list(axes.ravel())
     # units: good vs mua
@@ -570,7 +820,8 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
     # decoding accuracy across sessions (median error, step b) at every lead:
     # colour = unit set (good/good+mua), line style = prediction lead (0/1/3 s).
     axd = flat[2 + len(_PF_PLOT)]
-    for extra in flat[3 + len(_PF_PLOT):]:
+    axp = flat[3 + len(_PF_PLOT)]
+    for extra in flat[4 + len(_PF_PLOT):]:
         extra.axis("off")
     _qcol = {"good": "#2166ac", "good_mua": "#b2182b"}
     _qlab = {"good": "good", "good_mua": "good+mua"}
@@ -591,6 +842,35 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
         axd.set_ylim(bottom=0)
     else:
         axd.axis("off")
+
+    # behavioural performance: every scored trial as a point, the session median on
+    # the line. The spread is the point — a session median alone cannot show that
+    # the animal solved half the trials optimally and lost the other half.
+    trial_rows = [s.get("trial_rows") for s in sessions]
+    any_perf = np.isfinite(col("performance_med")).any()
+    if any_perf:
+        for xi, tr in enumerate(trial_rows):
+            if not isinstance(tr, pd.DataFrame) or tr.empty:
+                continue
+            v = pd.to_numeric(tr["performance"], errors="coerce").dropna().to_numpy()
+            if v.size:
+                axp.scatter(np.full(v.shape, xi) + np.linspace(-0.16, 0.16, v.size),
+                            v, s=7, alpha=0.45, color="#8a8985", edgecolor="none",
+                            zorder=1)
+        axp.plot(x, col("performance_med"), "o-", color="#2a78d6", zorder=2,
+                 label="session median")
+        axp.axhline(0, color="#52514e", lw=0.8, ls="--", zorder=0)
+        axp.set_title("behavioural performance  log10(shortest/actual hops)")
+        axp.set_ylabel("0 = optimal route")
+        axp.legend(fontsize=6)
+        axp.set_xticks(x); axp.set_xticklabels(labels, fontsize=6)
+        axp.spines["top"].set_visible(False); axp.spines["right"].set_visible(False)
+        for xi, (vi, ni) in enumerate(zip(col("performance_med"), col("performance_n_trials"))):
+            if np.isfinite(vi) and np.isfinite(ni):
+                axp.annotate(f"{int(ni)}", (xi, vi), textcoords="offset points",
+                             xytext=(0, 6), ha="center", fontsize=5, color="0.45")
+    else:
+        axp.axis("off")
     n_units = col("n_pf_units")
     for ax, (key, title, ylab) in zip(metric_axes, _PF_PLOT):
         ax.plot(x, col(key), "o-", color="#2166ac",
@@ -622,10 +902,14 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
                 ax.text(0.98, 0.03, f"per-unit ANOVA p={p:.3g} (k={k}, pseudo-replicated)",
                         transform=ax.transAxes, ha="right", va="bottom", fontsize=6,
                         color="#b2182b" if p < 0.05 else "0.3")
-    for ax in [axes[0, 0], axes[0, 1]] + metric_axes:
+    keys = [None, None] + [k for k, _t, _y in _PF_PLOT]
+    for ax, key in zip([axes[0, 0], axes[0, 1]] + metric_axes, keys):
         ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=6, rotation=0)
         ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
-        ax.set_ylim(bottom=0)          # all summary axes start from 0
+        # Counts and rates start at 0; a correlation does not — clamping stability
+        # to positive r would hide exactly the sessions where the map did not repeat.
+        if key not in _SIGNED_METRICS:
+            ax.set_ylim(bottom=0)
     windowed = sum(1 for s in sessions if s.get("trial_windows") == "build_trials")
     fig.suptitle(f"{animal} — cross-session summary ({len(sessions)} sessions, "
                  f"{windowed} trial-windowed)\n{_param_stamp(sessions)}", fontsize=10)
@@ -717,7 +1001,8 @@ def _plot_combined(pdf, units_all):
                     fontsize=6, color="#b2182b")
         ax.set_title(title); ax.set_ylabel(ylab)
         ax.set_xticks(xx); ax.set_xticklabels(labs, fontsize=7)
-        ax.set_ylim(bottom=0)
+        if key not in _SIGNED_METRICS:
+            ax.set_ylim(bottom=0)
         ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
     n_an = units_all["animal"].nunique()
     fig.suptitle(f"All animals combined ({n_an}) — pyramidal metrics by session\n"
@@ -1033,13 +1318,13 @@ def _out_stem(bin_cm, smooth_cm, min_occ_s):
 def run(root, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
         field_frac=PF.DEFAULT_FIELD_FRAC, min_field_cm=PF.DEFAULT_MIN_FIELD_CM,
         min_occ_s=PF.DEFAULT_MIN_OCC_S, min_peak_hz=PF.DEFAULT_MIN_PEAK_HZ,
-        min_spikes=100, si_match_n=300, si_match_repeats=20, seed=0):
+        min_spikes=100, si_match_n=300, si_match_repeats=20, seed=0, kl=True):
     root = Path(root)
     params = {"bin_cm": bin_cm, "smooth_cm": smooth_cm, "speed": speed,
               "field_frac": field_frac, "min_field_cm": min_field_cm,
               "min_occ_s": min_occ_s, "min_peak_hz": min_peak_hz,
               "min_spikes": min_spikes, "si_match_n": si_match_n,
-              "si_match_repeats": si_match_repeats, "seed": seed}
+              "si_match_repeats": si_match_repeats, "seed": seed, "kl": kl}
     # Cross-session summary uses only the session NWBs, which sit at most a few
     # levels down (root[/animal]/session/RatX_date.nwb). Use BOUNDED-DEPTH globs
     # instead of '**' so we never descend into the huge *_sorting_output/phy_export
@@ -1053,6 +1338,26 @@ def run(root, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
         print(f"No .nwb files found under {root}.")
         return
     print(f"Found {len(nwbs)} NWB file(s).")
+    # "auto": pick ONE matching count for the whole dataset from the data, so the
+    # same FRACTION of cells contributes in every session. A fixed count makes the
+    # estimator comparable but lets the population drift as trials shorten.
+    if str(si_match_n).lower() == "auto":
+        counts = []
+        for q in tqdm(nwbs, desc="si_match pre-pass", unit="nwb"):
+            try:
+                counts.append(epoch_spike_counts(q, speed=speed, smooth_cm=smooth_cm,
+                                                 bin_cm=bin_cm))
+            except Exception as e:
+                _log(f"  spike-count pre-pass failed on {q.name}: {e}")
+        si_match_n, frac = choose_si_match_n(counts)
+        if si_match_n is None:
+            print("  no session supplied spike counts; count-matched SI disabled.")
+        else:
+            print(f"  si_match_n = {si_match_n} spikes (auto): keeps "
+                  f"{frac:.0%} of pyramidal cells in the average session, "
+                  f"{min((c >= si_match_n).mean() for c in counts if len(c)):.0%} "
+                  f"in the thinnest one")
+        params["si_match_n"] = si_match_n
     # Resolve the physical parameters ONCE, up front, and say what they mean in
     # bins — running at a different bin size silently reinterprets every threshold
     # that is not stated in cm, and this line is the record that it did not.
@@ -1115,7 +1420,12 @@ def run(root, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
     # without them two spreadsheets with identical column sets can differ in every
     # value and nothing in either says why.
     cols = (["animal", "date", "repeat", "session", "split", "trial_windows",
-             "n_trials", "trial_time_s", "n_good", "n_mua", "n_pyr", "n_int",
+             "n_trials", "trial_time_s", "performance_med", "performance_n_trials",
+             "performance_trial_type"]
+            + ["si_match_n_used", "si_match_frac", "kl_spikes_per_trial"]
+            + [f"kl_{r}_{k}" for r in KL_REFERENCES
+               for k in ("per_bin", "mean", "slope")]
+            + ["n_good", "n_mua", "n_pyr", "n_int",
              "n_pf_units", "n_pf_units_post",
              "bin_cm", "smooth_cm", "sigma_bins", "min_occ_s", "field_frac",
              "min_field_cm", "speed_thresh_ms", "min_spikes"]
@@ -1128,6 +1438,18 @@ def run(root, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
              "quality_label", "cell_type", "subtype", "firing_rate_hz", "trough_to_peak_s",
              "acg_tau_rise_ms", "goal_node"] + list(_PF_KEYS)
     units_dp = units_all.reindex(columns=ucols) if not units_all.empty else pd.DataFrame()
+    # Per-trial behaviour, so the figures can show the spread behind each session's
+    # median rather than only the median itself.
+    trial_frames = [s["trial_rows"] for animal in sorted(by_animal) for s in by_animal[animal]
+                    if isinstance(s.get("trial_rows"), pd.DataFrame) and not s["trial_rows"].empty]
+    trials_dp = (pd.concat(trial_frames, ignore_index=True)
+                 if trial_frames else pd.DataFrame())
+    # Per-(trial, unit) map divergence and its per-cell slope over the day.
+    def _stack(key):
+        fr = [s[key] for animal in sorted(by_animal) for s in by_animal[animal]
+              if isinstance(s.get(key), pd.DataFrame) and not s[key].empty]
+        return pd.concat(fr, ignore_index=True) if fr else pd.DataFrame()
+    div_dp, slope_dp = _stack("trial_divergence"), _stack("kl_unit_slopes")
     anova_df, posthoc_df = _stats_tables(animal_units, units_all) if animal_units else (pd.DataFrame(), pd.DataFrame())
     # A reader of the spreadsheet alone gets the same warnings the figure carries.
     notes_df = pd.DataFrame(
@@ -1142,6 +1464,12 @@ def run(root, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
             df.to_excel(xw, index=False, sheet_name="sessions")
             if not units_dp.empty:
                 units_dp.to_excel(xw, index=False, sheet_name="units")
+            if not trials_dp.empty:
+                trials_dp.to_excel(xw, index=False, sheet_name="trials")
+            if not div_dp.empty:
+                div_dp.to_excel(xw, index=False, sheet_name="trial_divergence")
+            if not slope_dp.empty:
+                slope_dp.to_excel(xw, index=False, sheet_name="kl_slopes")
             if not tu_all.empty:
                 tu_all.to_excel(xw, index=False, sheet_name="trial_unit_metrics")
             if not anova_df.empty:
@@ -1152,8 +1480,10 @@ def run(root, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
         print(f"Wrote {xlsx} (sessions: {len(df)}, unit datapoints: {len(units_dp)}, "
               f"anova: {len(anova_df)}, posthoc: {len(posthoc_df)} rows)")
     except Exception as e:
-        for name, d in [("", df), ("_units", units_dp), ("_anova", anova_df),
-                        ("_posthoc", posthoc_df), ("_notes", notes_df)]:
+        for name, d in [("", df), ("_units", units_dp), ("_trials", trials_dp),
+                        ("_divergence", div_dp), ("_kl_slopes", slope_dp),
+                        ("_anova", anova_df), ("_posthoc", posthoc_df),
+                        ("_notes", notes_df)]:
             if not d.empty:
                 d.to_csv(root / f"{stem}{name}.csv", index=False)
         print(f"Could not write xlsx ({e}); wrote CSVs instead.")
@@ -1191,13 +1521,22 @@ def main(argv=None):
     ap.add_argument("--min_spikes", type=int, default=100,
                     help="a unit needs this many in-epoch spikes to contribute "
                          "(default: 100); below it every metric is NaN.")
-    ap.add_argument("--si_match_n", type=int, default=300,
-                    help="spike count for the count-matched spatial information "
-                         "(default: 300); 0 disables it.")
+    ap.add_argument("--si_match_n", default="300",
+                    help="spike count for the count-matched spatial information. "
+                         "A number fixes it (default 300); 'auto' derives ONE count "
+                         "for the whole dataset from a cheap pre-pass, the largest "
+                         "at which 90%% of the pyramidal cells qualify in every "
+                         "session — which keeps the contributing POPULATION fixed, "
+                         "not just the estimator; 0 disables it.")
     ap.add_argument("--si_match_repeats", type=int, default=20,
                     help="draws averaged for the count-matched SI (default: 20).")
     ap.add_argument("--seed", type=int, default=0,
                     help="seed for the count-matched SI subsampling (default: 0).")
+    ap.add_argument("--no-kl", action="store_true",
+                    help="skip the per-trial map divergence (Poisson KL against "
+                         "the leave-one-out and free-roam references). It is the "
+                         "most expensive part of a session, and only sessions with "
+                         "trustworthy trial windows get it at all.")
     ap.add_argument("--smooth", type=float, default=None,
                     help="DEPRECATED sigma in BINS; converted to cm as "
                          "smooth*bin_cm so old invocations keep their physical "
@@ -1212,8 +1551,11 @@ def main(argv=None):
         run(args.root, bin_cm=args.bin_cm, smooth_cm=smooth_cm, speed=args.speed,
             field_frac=args.field_frac, min_field_cm=args.min_field_cm,
             min_occ_s=args.min_occ_s, min_peak_hz=args.min_peak_hz,
-            min_spikes=args.min_spikes, si_match_n=args.si_match_n or None,
-            si_match_repeats=args.si_match_repeats, seed=args.seed)
+            min_spikes=args.min_spikes,
+            si_match_n=(args.si_match_n if str(args.si_match_n).lower() == "auto"
+                        else (int(args.si_match_n) or None)),
+            si_match_repeats=args.si_match_repeats, seed=args.seed,
+            kl=not args.no_kl)
     except Exception as e:
         print(f"[session-summary] Failed: {e}")
         traceback.print_exc()

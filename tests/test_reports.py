@@ -218,3 +218,63 @@ def test_session_summary_on_empty_root_is_a_no_op(tmp_path, capsys):
 
 def test_session_summary_cli(nwb_root):
     assert session_summary.main(["--root", str(nwb_root)]) == 0
+
+
+# ------------------------------------------------- per-trial map divergence
+def test_trial_divergence_scores_every_trial_against_both_references():
+    """The two references answer different questions and both must reach the
+    table: internal consistency, and drift from a goal-independent baseline."""
+    import numpy as np
+    from hm_rat_analysis import place_fields as PF
+    from hm_rat_analysis.reports import session_summary as SS
+
+    dt, n = 1 / 30.0, 12000
+    t = np.arange(n) * dt
+    s = np.abs(((np.arange(n) / 900.0) % 2.0) - 1.0)
+    x, y = 1.0 + 6.0 * s, 0.6 + 3.4 * s
+    spikes = t[np.hypot(x - 4.0, y - 2.0) < 0.35]
+    wins = [(k * 40.0, (k + 1) * 40.0 - 1.0) for k in range(int(t[-1] // 40.0))]
+    occs = [PF.occupancy_parts(x, y, t, (0, 9, 0, 5), (180, 100), dt, 1.0, t0=a, t1=b)
+            for a, b in wins]
+    udf = pd.DataFrame({"spike_times": [spikes], "phy_cluster_id": [7]})
+    types = [1] * len(occs); types[0] = 4        # one free-roaming trial
+
+    div = SS._trial_divergence(occs, types, udf, [0], {"animal": "Rat5"},
+                               sigma=1.0, min_occ_s=0.30)
+    assert len(div) == len(occs)
+    for ref in SS.KL_REFERENCES:
+        assert f"kl_{ref}_per_bin" in div and f"kl_{ref}_n_bins" in div
+        assert div[f"kl_{ref}_per_bin"].notna().any(), f"{ref} produced nothing"
+    # the free-roaming trial is scored too — it is the control, not a gap
+    assert (div["trial_type"] == 4).sum() == 1
+
+    slopes = SS._kl_unit_slopes(div, {"animal": "Rat5"})
+    assert len(slopes) == 1 and slopes.loc[0, "unit_id"] == 7
+    # goal trials only: the free-roaming trial must not enter the cumulative curve
+    assert slopes.loc[0, "n_trials"] == len(occs) - 1
+
+
+def test_auto_si_match_picks_one_count_that_every_session_can_supply():
+    """A per-session threshold would be wrong: SI at 300 spikes is not comparable
+    with SI at 100, so the count has to be global. What the auto mode equalises is
+    the FRACTION of cells contributing, which a fixed count does not."""
+    import numpy as np
+    from hm_rat_analysis.reports import session_summary as SS
+
+    rich = np.array([2000, 1500, 1200, 900, 800, 700, 600, 500, 400, 350], float)
+    thin = np.array([600, 400, 300, 220, 180, 150, 120, 100, 90, 80], float)
+    n, frac = SS.choose_si_match_n([rich, thin], target_frac=0.9)
+    assert n is not None
+    # every session keeps at least the target fraction, thin one included
+    for c in (rich, thin):
+        assert (c >= n).mean() >= 0.9 - 1e-9
+    assert frac >= 0.9
+    # the thin session is what binds it, and the count lands far below the fixed
+    # 300 that keeps under half of that session's cells
+    assert n < np.median(thin)
+    assert (thin >= 300).mean() < 0.5
+
+    # a stricter target can only lower the count
+    n2, _ = SS.choose_si_match_n([rich, thin], target_frac=1.0)
+    assert n2 <= n
+    assert SS.choose_si_match_n([], target_frac=0.9)[0] is None

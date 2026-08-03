@@ -32,11 +32,18 @@ tracker's huge `phy_export` directories. Writes into `--root`:
 | Output | Contents |
 | --- | --- |
 | `session_summary.pdf` | 2 pages per animal (metrics over sessions; cell-type scatter), a pooled page when there is more than one animal, and decoder pages when step `b` was run |
-| `session_summary.xlsx` | sheets `sessions`, `units`, `trial_unit_metrics`, `anova`, `posthoc` — falls back to `session_summary*.csv` if the workbook cannot be written |
+| `session_summary.xlsx` | sheets `sessions`, `units`, `trials`, `trial_unit_metrics`, `anova`, `posthoc` — falls back to `session_summary*.csv` if the workbook cannot be written |
 
 Metrics per session: GOOD/MUA unit counts, pyramidal vs interneuron counts,
-pyramidal spatial information (Skaggs, bits/spike), selectivity (peak/mean),
-place-field count, and place-field distance to the goal node.
+behavioural performance, pyramidal spatial information (Skaggs, bits/spike),
+selectivity (peak/mean), map stability, place-field count, field size, and
+place-field distance to the goal node.
+
+Behavioural performance is `log10(shortest hops / actual hops)` per trial, read
+from the session's `RecordingMeta.xlsx` (`Start_Nodes`, `Goal_Node`, `paths`) and
+scored against the maze graph — the same definition the tracker's decoder uses, so
+the two agree. Map stability is the Pearson correlation between rate maps built
+from **alternate trials**, over the bins valid in both halves.
 
 ### `hm-trial-report` — one behavioural session
 
@@ -56,6 +63,52 @@ Each trial is scored against the maze graph as `log(optimal / actual)`, so 0 is 
 perfect route and more negative is more wandering. It is computed over physical
 distance (`dist_log_score`) and over hop count (`hops_log_score`), because a rat
 can take a topologically direct route that is physically long, or vice versa.
+
+## The MSCA figures
+
+`figures/` holds proposal figures rather than reports; they are run directly, not
+installed as commands.
+
+```bash
+python figures/msca_fig1.py --nwb <session.nwb> --units 25 149 221 294 437 538 \
+    --summary <session_summary_*.xlsx> --out MSCA_figures/Fig1
+```
+
+| Panel | Shows |
+| --- | --- |
+| a | every listed unit's spikes on one idealised maze, fields outlined, correlograms inset (this is all of `msca_fig1a.py`, which still runs standalone) |
+| b–g | unit yield, behavioural performance, spatial information, place-field count, field size and map stability, as a 2 × 3 grid |
+
+Panels b–g share one x axis: a slot per session, ordered by repeat, with a gap
+wherever the repeat changes, so the tick only carries the session number and the
+blocks are visible. A repeat **is** a goal location, so blocks are labelled
+`goal 1`, `goal 2` …, and repeat 0 — before any goal was set — is `habituation`.
+Every animal in the summary is drawn on that axis in its own hue, as a separate
+series: the animals were not recorded on the same days, so repeat/session is the
+only slot they can share, and pooling them would let one line hide a disagreement
+between two rats. The session panel a comes from is banded in every panel.
+
+Output is **transparent and fully vector** by default — PDF, SVG and PNG, with no
+rasterised layers and text embedded as TrueType (PDF) / real `<text>` (SVG), so
+labels stay editable in Illustrator or Inkscape. `--rasterize-spikes` embeds panel
+a's trajectory and spike clouds as an image for a much smaller file (those two
+layers stop being editable); `--opaque` paints the page background back in.
+
+**Sized for the page it goes on.** The default is 170 mm wide (A4 less 20 mm
+margins) and every type size is fixed in the 8–11 pt band — points are absolute, so
+a smaller page gets smaller *artwork* around the same-sized text, not shrunken
+labels. That only holds if the figure is placed at 100%: in Word, insert it and set
+the picture width to **17 cm**, never drag-resize, or the type rescales with the
+picture. `--width <inches>` re-authors it for a different column.
+Panels d and f cap the y axis (`YMAX` in the script) because both have a tail long
+enough to flatten the rest; each says how many measurements are above the cap, and
+the cap is raised if it would ever hide a session median.
+
+Panels b–g **read the summary xlsx** rather than recomputing, so the figure and
+the report cannot disagree — run `hm-session-summary` first. A summary produced
+before stability and field size existed as columns has to be re-run, and the
+panels say so on the figure instead of failing. `--summary-only` draws the grid
+without opening an NWB; `--animal Rat6` restricts it to named animals.
 
 ## Gotchas worth knowing
 
@@ -86,6 +139,7 @@ src/hm_rat_analysis/
 ├── stats.py           # one-way ANOVA and Holm-corrected pairwise tests
 ├── data/              # node_list_new.csv
 └── reports/           # one module per PDF, each with a main()
+figures/               # proposal figures, run directly (msca_fig1.py composes msca_fig1a.py)
 tests/                 # pytest suite; fixtures build synthetic sessions
 notebooks/             # exploratory notebooks
 ```

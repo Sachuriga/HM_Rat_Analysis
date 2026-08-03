@@ -105,3 +105,53 @@ def test_trial_trajectories_drops_the_tail(session_dir):
 def test_load_session_without_logs_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         behaviour.load_session(tmp_path)
+
+
+# ------------------------------------------------------------ task performance
+def _perf_meta(tmp_path, rows):
+    import pandas as pd
+    pd.DataFrame(rows).to_excel(tmp_path / "RecordingMeta.xlsx", index=False)
+    return tmp_path
+
+
+def test_trial_performance_scores_an_optimal_run_at_zero(tmp_path):
+    """log10(shortest/actual) is 0 when the rat walked the graph's own shortest
+    path, and negative for every detour — so the sign alone says 'suboptimal'."""
+    import networkx as nx
+    from hm_rat_analysis import maze
+
+    G = maze.build_graph()
+    start, goal = "224", "217"
+    route = nx.shortest_path(G, start, goal)
+    detour = route[:1] + [n for n in nx.shortest_path(G, start, route[1])] + route[1:]
+
+    d = _perf_meta(tmp_path, [
+        {"Trial_Type": 1, "Start_Nodes": int(start), "Goal_Node": int(goal),
+         "paths": ", ".join(route)},
+        {"Trial_Type": 1, "Start_Nodes": int(start), "Goal_Node": int(goal),
+         "paths": ", ".join(detour)},
+    ])
+    tp = behaviour.trial_performance(d)
+    assert list(tp["trial"]) == [1, 2]
+    assert tp.loc[0, "performance"] == pytest.approx(0.0)
+    assert tp.loc[1, "performance"] < 0
+    assert tp.loc[0, "actual_hops"] == tp.loc[0, "shortest_hops"] == len(route) - 1
+
+
+def test_trial_performance_stops_at_the_first_goal_visit(tmp_path):
+    """A rat that reaches the goal and keeps walking has still solved the trial."""
+    import networkx as nx
+    from hm_rat_analysis import maze
+
+    G = maze.build_graph()
+    start, goal = "224", "217"
+    route = nx.shortest_path(G, start, goal)
+    overshoot = route + [n for n in G.neighbors(goal)][:2]
+    d = _perf_meta(tmp_path, [{"Trial_Type": 1, "Start_Nodes": int(start),
+                               "Goal_Node": int(goal), "paths": ", ".join(overshoot)}])
+    assert behaviour.trial_performance(d).loc[0, "performance"] == pytest.approx(0.0)
+
+
+def test_trial_performance_without_a_metadata_sheet_is_empty_not_an_error(tmp_path):
+    tp = behaviour.trial_performance(tmp_path)
+    assert tp.empty and "performance" in tp.columns

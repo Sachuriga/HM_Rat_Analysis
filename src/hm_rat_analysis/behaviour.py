@@ -19,8 +19,11 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
+import networkx as nx
 import numpy as np
 import pandas as pd
+
+from . import maze
 
 #: Tracker camera sampling rate (Hz). Position samples are assumed evenly spaced.
 FS = 30.0
@@ -149,6 +152,93 @@ def load_session_meta(work_dir):
         except (TypeError, ValueError):
             goal = None
     return meta, goal
+
+
+# ------------------------------------------------------------
+#                     task performance
+# ------------------------------------------------------------
+#: Columns a metadata sheet needs before a trial's performance can be scored.
+_PERF_COLS = ("Start_Nodes", "Goal_Node", "paths")
+
+
+def _perf_meta_frame(work_dir):
+    """The session's metadata sheet that actually carries the node sequences.
+
+    A session folder can hold more than one ``*Meta.xlsx`` (the tracker's own
+    summary alongside RecordingMeta), and only one of them has the per-trial
+    ``paths`` column, so the file is chosen by its COLUMNS rather than by name.
+    """
+    for p in find_session_files(work_dir)["meta"]:
+        if p.name.startswith("._"):          # macOS AppleDouble sidecar, not xlsx
+            continue
+        try:
+            df = pd.read_excel(p, sheet_name=0)
+        except Exception as e:
+            print(f"Could not read {p.name} ({e}).")
+            continue
+        if set(_PERF_COLS) <= set(df.columns):
+            return df, p
+    return None, None
+
+
+def trial_performance(work_dir, graph=None):
+    """Per-trial path efficiency, ``log10(shortest hops / actual hops)``.
+
+    0 is an optimal run and every detour is negative; the log makes a two-fold
+    detour the same distance from optimal wherever it starts, which an efficiency
+    RATIO does not. Hops, not metres: the rat chooses nodes, and a hop count is the
+    quantity the maze graph can state an optimum for.
+
+    ``actual`` is the number of steps to the FIRST arrival at the goal — a rat that
+    reaches the goal and then keeps walking has still solved the trial — and falls
+    back to the whole sequence when the goal was never reached.
+
+    Returns a DataFrame (``trial``, ``trial_type``, ``start_node``, ``goal_node``,
+    ``shortest_hops``, ``actual_hops``, ``performance``), one row per trial, empty
+    when the session has no metadata sheet carrying node sequences.
+    """
+    df, src = _perf_meta_frame(work_dir)
+    cols = ["trial", "trial_type", "start_node", "goal_node",
+            "shortest_hops", "actual_hops", "performance"]
+    if df is None:
+        return pd.DataFrame(columns=cols)
+    G = maze.build_graph() if graph is None else graph
+    rows = []
+    for i, r in enumerate(df.itertuples(index=False), start=1):
+        d = r._asdict()
+        start = _first_int_or_none(d.get("Start_Nodes"))
+        goal = _first_int_or_none(d.get("Goal_Node"))
+        paths = str(d["paths"]) if pd.notna(d.get("paths")) else ""
+        try:
+            ttype = int(d.get("Trial_Type"))
+        except (TypeError, ValueError):
+            ttype = -1
+        seq = [int(v) for v in paths.split(",") if v.strip().lstrip("-").isdigit()]
+        shortest = actual = np.nan
+        if start is not None and goal is not None and seq:
+            actual = seq.index(goal) if goal in seq else len(seq) - 1
+            try:
+                shortest = nx.shortest_path_length(G, str(start), str(goal))
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                shortest = np.nan
+        perf = (float(np.log10(shortest / actual))
+                if np.isfinite(shortest) and np.isfinite(actual)
+                and shortest > 0 and actual > 0 else np.nan)
+        rows.append({"trial": i, "trial_type": ttype, "start_node": start,
+                     "goal_node": goal, "shortest_hops": shortest,
+                     "actual_hops": actual, "performance": perf})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _first_int_or_none(v):
+    """First integer in a scalar or comma-list (``Start_Nodes`` may be '224' or
+    '224,315'); None if there is nothing to parse."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    try:
+        return int(float(str(v).split(",")[0]))
+    except (TypeError, ValueError):
+        return None
 
 
 def load_time_reference(work_dir):
