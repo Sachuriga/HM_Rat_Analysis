@@ -732,7 +732,7 @@ def build(out_stem, nwb_path=None, units=None, summary_path=None, animal=None,
                                               si_mode=si_mode, highlight=highlight,
                                               rasterize=rasterize, scale=scale)
 
-    out_stem = Path(out_stem)
+    out_stem = F1A.out_path(out_stem)
     out_stem.parent.mkdir(parents=True, exist_ok=True)
     # PDF and SVG both, because vector editors disagree about which they open
     # cleanly: Illustrator prefers the PDF, Inkscape and the browser the SVG. Text
@@ -773,7 +773,10 @@ def main(argv=None):
     ap.add_argument("--si", default="auto", choices=["auto", "matched", "raw"],
                     help="spatial information: the spike-count-matched column when "
                          "the summary has it (default), or force either")
-    ap.add_argument("--out", default="fig1")
+    ap.add_argument("--out", default="fig1",
+                    help=f"output stem (default %(default)s). A bare name lands in "
+                         f"{F1A.OUT_DIR}; set MSCA_FIG_DIR to move that, or give a "
+                         "path of your own to bypass it")
     ap.add_argument("--width", type=float, default=A4_TEXT_WIDTH_IN,
                     help="page width in INCHES (default %(default).2f = A4 less "
                          "20 mm margins). Place the figure at this width and do "

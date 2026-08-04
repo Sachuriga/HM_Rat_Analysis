@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 from pathlib import Path
 
@@ -44,6 +45,19 @@ INK2 = "#52514e"
 MUTED = "#8a8985"
 SURFACE = "#fcfcfb"
 MAZE_LINE = "#c9c8c2"
+
+#: Where the finished figures go. Every figure script writes here by default, so
+#: the proposal's artwork collects in one folder instead of wherever the shell
+#: happened to be when it ran. Set MSCA_FIG_DIR to move it; an --out that names a
+#: directory of its own (or an absolute path) still wins over both.
+OUT_DIR = Path(os.environ.get("MSCA_FIG_DIR",
+                              "/Users/sachuriga/Desktop/MSCA_figures"))
+
+
+def out_path(stem):
+    """`stem` resolved under :data:`OUT_DIR`, unless it already says where to go."""
+    p = Path(stem)
+    return p if p.is_absolute() or p.parent != Path(".") else OUT_DIR / p
 
 ACG_FAST = (0.020, 0.0005, "± 20 ms")
 ACG_SLOW = (0.500, 0.005, "± 500 ms")
@@ -602,7 +616,7 @@ def build(nwb_path, units, out_stem, bin_cm=5.0, min_occ=0.25, sigma=1.0,
     fig.text(left + 0.004, 0.982, f"Rat {data['animal']}  \u00b7  {data['date']}",
              fontsize=10, color=INK2)
 
-    out_stem = Path(out_stem)
+    out_stem = out_path(out_stem)
     out_stem.parent.mkdir(parents=True, exist_ok=True)
     pdf, png = out_stem.with_suffix(".pdf"), out_stem.with_suffix(".png")
     fig.savefig(pdf, facecolor=SURFACE)
@@ -615,7 +629,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--nwb", required=True)
     ap.add_argument("--units", type=int, nargs="+", required=True)
-    ap.add_argument("--out", default="fig1a")
+    ap.add_argument("--out", default="fig1a",
+                    help=f"output stem (default %(default)s). A bare name lands in "
+                         f"{OUT_DIR}; set MSCA_FIG_DIR to move that, or give a path "
+                         "of your own to bypass it")
     ap.add_argument("--bin-cm", type=float, default=5.0)
     ap.add_argument("--min-occ", type=float, default=0.25,
                     help="blank rate-map bins visited for less than this (s)")
