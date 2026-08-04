@@ -660,7 +660,10 @@ def build(out_stem, nwb_path=None, units=None, summary_path=None, animal=None,
     if not strip_only:
         if not nwb_path or not units:
             raise ValueError("panel a needs --nwb and --units (or pass --summary-only)")
-        data = F1A.load_session(nwb_path, units, **panel_a_kw)
+        # the caption offset goes in too: the unit labels are laid out against it,
+        # so they can be pushed clear of the "goal N" text before anything is drawn
+        data = F1A.load_session(nwb_path, units,
+                                goal_label_offset=goal_label_offset, **panel_a_kw)
 
     scale = width / REF_WIDTH_IN
     # Margins in INCHES, not fractions: the left one has to hold a 9 pt y label plus

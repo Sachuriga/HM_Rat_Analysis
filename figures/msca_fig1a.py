@@ -39,6 +39,7 @@ from pynwb import NWBHDF5IO                                       # noqa: E402
 
 from hm_rat_analysis import maze, nwb as nwbio, place_fields as PF  # noqa: E402
 from hm_rat_analysis import spike_metrics as SM                     # noqa: E402
+from hm_rat_analysis.behaviour import moving_average                 # noqa: E402
 
 INK = "#0b0b0b"
 INK2 = "#52514e"
@@ -116,6 +117,34 @@ def to_hex(rgb):
     return "#%02x%02x%02x" % tuple(round(max(0, min(1, v)) * 255) for v in rgb)
 
 
+#: Seconds the position trace is smoothed over before it is differentiated into a
+#: speed. The tracker writes INTEGER PIXELS at ~30 Hz, so a raw sample-to-sample
+#: difference can only be zero or one whole pixel — on this rig that is 0 m/s or
+#: 0.16 m/s and nothing in between, with 85% of samples sitting at exactly zero.
+#: A threshold anywhere below that quantum therefore keeps exactly the samples
+#: where the animal moved AT ALL, whatever number it is given: 2.5 cm/s, 5 cm/s
+#: and 15 cm/s all select the same spikes. Smoothing first spreads one pixel step
+#: across the window, which is what makes a few-cm/s threshold mean what it says.
+SPEED_SMOOTH_S = 0.40
+
+
+def trace_speed(x, y, t, smooth_s=SPEED_SMOOTH_S):
+    """Speed per position sample in m/s, from a trace smoothed over `smooth_s`.
+
+    See :data:`SPEED_SMOOTH_S` for why the smoothing is not optional.
+    """
+    x, y, t = (np.asarray(v, float) for v in (x, y, t))
+    if x.size < 2:
+        return np.zeros_like(x)
+    dts = np.diff(t)
+    dt = float(np.median(dts))
+    k = max(1, int(round(smooth_s / dt))) if dt > 0 else 1
+    xs, ys = moving_average(x, k), moving_average(y, k)
+    speed = np.zeros_like(xs)
+    speed[1:] = np.hypot(np.diff(xs), np.diff(ys)) / np.where(dts > 0, dts, np.inf)
+    return speed
+
+
 def maze_bbox(nodes_m, margin=0.28):
     if not nodes_m:
         return maze.MAZE_EXTENT
@@ -182,12 +211,13 @@ def spikes_on_path(x, y, t, spike_times, rate, extent, speed_thresh=0.025,
     if xg.size < 2:
         return np.array([]), np.array([]), np.array([])
 
-    # speed at each position sample, and each spike's speed by interpolation —
-    # the same gate the rate map uses, so the two show the same spikes
-    speed = np.zeros_like(xg)
-    d = np.hypot(np.diff(xg), np.diff(yg))
-    dts = np.diff(tg)
-    speed[1:] = d / np.where(dts > 0, dts, np.inf)
+    # Speed at each position sample, and each spike's speed by interpolation. The
+    # trace is SMOOTHED first (see trace_speed): differentiated raw, this tracker
+    # can only say "moved a pixel" or "did not", so the threshold below would keep
+    # the same spikes at any value under 0.16 m/s. That makes this gate slightly
+    # stricter than the rate map's, which is computed on the raw trace by the
+    # package — a spike drawn here is one the animal was genuinely moving for.
+    speed = trace_speed(xg, yg, tg)
 
     sx = np.interp(st, tg, xg, left=np.nan, right=np.nan)
     sy = np.interp(st, tg, yg, left=np.nan, right=np.nan)
@@ -244,8 +274,41 @@ def peak_anchor(norm, extent):
             y0 + (iy + 0.5) * (y1 - y0) / ny)
 
 
-def place_labels(layers, bbox, min_sep=0.66, offset=0.60):
-    """Put each unit's number beside its peak, then push apart any that collide."""
+def _segments_cross(p1, p2, p3, p4):
+    """Whether segment p1-p2 properly crosses segment p3-p4."""
+    def side(a, b, c):
+        return ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+    d1, d2 = side(p3, p4, p1), side(p3, p4, p2)
+    d3, d4 = side(p1, p2, p3), side(p1, p2, p4)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+
+def _closest_on_segment(p, a, b):
+    ax_, ay_ = a
+    vx, vy = b[0] - ax_, b[1] - ay_
+    L2 = vx * vx + vy * vy
+    if L2 <= 0:
+        return a
+    t = max(0.0, min(1.0, ((p[0] - ax_) * vx + (p[1] - ay_) * vy) / L2))
+    return (ax_ + t * vx, ay_ + t * vy)
+
+
+def place_labels(layers, bbox, min_sep=0.66, offset=0.60, avoid=(), avoid_sep=1.15,
+                 avoid_segments=()):
+    """Put each unit's number beside its peak, then push apart any that collide.
+
+    `avoid` holds points no label may sit on — the "goal N" caption, which is fixed
+    text this cannot move, so a unit whose peak lands near the goal has to give way
+    instead. Without it a label and the caption overprint into one unreadable
+    string, and the goal is exactly where the interesting fields are.
+    `avoid_sep` is larger than `min_sep` because the caption is a whole word wide
+    while a unit label is two or three digits.
+
+    `avoid_segments` holds LINES no label's leader may cross — the caption's own
+    leader to the star. Keeping the label clear of the caption is not enough on its
+    own: the label can sit well away and still throw its leader straight across the
+    caption's, and two crossing arrows read as one broken arrow pointing nowhere.
+    """
     mid_y = (bbox[2] + bbox[3]) / 2
     for lay in layers:
         if lay["anchor"] is None:
@@ -257,6 +320,32 @@ def place_labels(layers, bbox, min_sep=0.66, offset=0.60):
     placed = [l for l in layers if l["label_xy"] is not None]
     for _ in range(80):
         moved = False
+        for lay in placed:                       # fixed text pushes, never moves
+            xi, yi = lay["label_xy"]
+            for (gx, gy) in avoid:
+                dx, dy = xi - gx, yi - gy
+                d = float(np.hypot(dx, dy))
+                if d >= avoid_sep:
+                    continue
+                if d < 1e-6:
+                    dx, dy, d = 0.0, -1.0, 1.0
+                push = avoid_sep - d + 0.01
+                lay["label_xy"] = (xi + dx / d * push, yi + dy / d * push)
+                moved = True
+        for lay in placed:
+            # slide the label off any leader it crosses, along the perpendicular
+            for (s0, s1) in avoid_segments:
+                if not _segments_cross(lay["label_xy"], lay["anchor"], s0, s1):
+                    continue
+                near = _closest_on_segment(lay["label_xy"], s0, s1)
+                dx, dy = lay["label_xy"][0] - near[0], lay["label_xy"][1] - near[1]
+                d = float(np.hypot(dx, dy))
+                if d < 1e-6:
+                    dx, dy, d = -(s1[1] - s0[1]), s1[0] - s0[0], 1.0
+                    d = float(np.hypot(dx, dy)) or 1.0
+                lay["label_xy"] = (lay["label_xy"][0] + dx / d * 0.28,
+                                   lay["label_xy"][1] + dy / d * 0.28)
+                moved = True
         for i in range(len(placed)):
             for j in range(i + 1, len(placed)):
                 (xi, yi), (xj, yj) = placed[i]["label_xy"], placed[j]["label_xy"]
@@ -410,6 +499,10 @@ def empty_corner_boxes(G, pos, bbox, clearance=0.22, grid=(240, 140)):
     than eyeballing where, rasterise the edges and grow the largest empty
     rectangle from each corner. Returned in axes fraction with the y axis already
     inverted, so they can be handed straight to ``ax.inset_axes``.
+
+    Putting the correlograms in space the maze was never going to use is what lets
+    the maze itself keep the whole panel — a margin band around it would cost the
+    spikes about a quarter of their width.
     """
     x0, x1, y0, y1 = bbox
     nx_, ny_ = grid
@@ -466,8 +559,9 @@ def _window_captions(avail_in, fontsize):
 def inset_correlograms(ax, layers, boxes, pad=0.018, scale=1.0, fonts=None):
     """Tuck each unit's correlograms into the maze's empty corners.
 
-    Units are split between the two boxes; each gets one row holding its two
-    windows side by side, with its number in its own colour at the left.
+    Units are split between the two boxes — top-left and bottom-right — and each
+    gets one row holding its two windows side by side, with its number in its own
+    colour at the left.
     """
     fonts = FONT if fonts is None else fonts
     n = len(layers)
@@ -512,7 +606,8 @@ def inset_correlograms(ax, layers, boxes, pad=0.018, scale=1.0, fonts=None):
 
 def load_session(nwb_path, units, bin_cm=5.0, min_occ=0.25, sigma=1.0,
                  speed_thresh=0.025, gamma=2.0, field_frac=0.30,
-                 min_field_bins=3, max_jitter=0.10, palette=DEFAULT_PALETTE):
+                 min_field_bins=3, max_jitter=0.10, palette=DEFAULT_PALETTE,
+                 goal_label_offset=GOAL_LABEL_OFFSET):
     """Everything panel a needs from one session NWB, drawn by :func:`draw_panel_a`.
 
     Kept apart from the drawing so the panel can be composed into a larger figure
@@ -577,7 +672,15 @@ def load_session(nwb_path, units, bin_cm=5.0, min_occ=0.25, sigma=1.0,
         io.close()
 
     bbox = maze_bbox(nodes_m)
-    place_labels(layers, bbox)
+    # The goal caption and the star are both fixed text; unit labels route around
+    # them rather than landing on top (see place_labels).
+    avoid, avoid_segments = [], []
+    if goal_xy:
+        caption = (goal_xy[0] + goal_label_offset[0],
+                   goal_xy[1] + goal_label_offset[1])
+        avoid = [goal_xy, caption]
+        avoid_segments = [(caption, goal_xy)]   # the caption's own leader
+    place_labels(layers, bbox, avoid=avoid, avoid_segments=avoid_segments)
     return dict(layers=layers, path=(xm, ym), goal_xy=goal_xy, goal_node=goal_node,
                 bbox=bbox, animal=animal, date=date)
 
@@ -600,7 +703,7 @@ def build(nwb_path, units, out_stem, bin_cm=5.0, min_occ=0.25, sigma=1.0,
     data = load_session(nwb_path, units, bin_cm=bin_cm, min_occ=min_occ, sigma=sigma,
                         speed_thresh=speed_thresh, gamma=gamma, field_frac=field_frac,
                         min_field_bins=min_field_bins, max_jitter=max_jitter,
-                        palette=palette)
+                        palette=palette, goal_label_offset=goal_label_offset)
     bbox = data["bbox"]
 
     width = 15.0

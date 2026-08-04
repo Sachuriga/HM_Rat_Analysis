@@ -139,7 +139,7 @@ for sp in ("top", "right", "left"): axa.spines[sp].set_visible(False)
 axa.spines["bottom"].set_color(MUTED)
 axa.tick_params(axis="y", length=0, labelcolor=INK2)
 axa.tick_params(axis="x", labelsize=7, colors=MUTED, labelcolor=INK2)
-ftitle("a", "One recording day, run in two shifts: 2 implanted animals recorded, 6 non-implanted trained", 0.955)
+ftitle("A", "One recording day, run in two shifts: 2 implanted animals recorded, 6 non-implanted trained", 0.955)
 
 hl = [Rectangle((0, 0), 1, 1, fc=c) for c in (C_PRE, C_MAZE, C_POST, C_TRAIN)]
 fig.legend(hl, ["pre-sleep (sleep box)", "HexMaze navigation + recording",
@@ -172,7 +172,7 @@ for s in ("top", "right", "left"): axb.spines[s].set_visible(False)
 axb.spines["bottom"].set_color(MUTED)
 axb.tick_params(axis="y", length=0, labelcolor=INK2)
 axb.tick_params(axis="x", length=2, colors=MUTED, labelcolor=INK2)
-ftitle("b", "Session cadence: one session per animal per day. GL = goal location, S = session", 0.660)
+ftitle("B", "Session cadence: one session per animal per day. GL = goal location, S = session", 0.660)
 
 # ------------------------------------------------------------------ c
 axc = panel(0.150, 0.372, 0.830, 0.080)
@@ -189,7 +189,7 @@ for x0, x1, t, col in [(0, 4, "schema build-up: 4 goal locations", C_GL),
         axc.plot([xx, xx], [1.55, 1.69], color=col, lw=0.9)
     axc.text((x0 + x1) / 2, 1.76, t, ha="center", fontsize=7, color=col, fontweight="bold")
 axc.set_xlim(-0.1, 9.1); axc.set_ylim(0.30, 1.98); axc.axis("off")
-ftitle("c", "Full experiment, implanted animal: 1 block = 1 week = 5 sessions", 0.462)
+ftitle("C", "Full experiment, implanted animal: 1 block = 1 week = 5 sessions", 0.462)
 
 # ------------------------------------------------------------------ d
 axd = panel(0.055, 0.055, 0.425, 0.265)
@@ -238,7 +238,7 @@ axd.annotate("barrier on the bridge\nnearest the goal", xy=(bx, by),
 axd.set_aspect("equal"); axd.axis("off")
 axd.set_xlim(min(p[0] for p in pos.values()) - 0.25, max(p[0] for p in pos.values()) + 0.25)
 axd.set_ylim(min(p[1] for p in pos.values()) - 1.05, max(p[1] for p in pos.values()) + 0.95)
-ftitle("d", "Update manipulation", 0.330)
+ftitle("D", "Update manipulation", 0.330)
 hd = [plt.Line2D([], [], color=INK, lw=1.2, ls=(0, (2.4, 1.8))),
       plt.Line2D([], [], color=C_MAZE, lw=1.9)]
 axd.legend(hd, [f"before barrier ({len(direct)-1} hops)",
