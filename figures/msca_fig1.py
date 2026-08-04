@@ -55,6 +55,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -67,6 +68,9 @@ from matplotlib.transforms import offset_copy                     # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import msca_fig1a as F1A                                          # noqa: E402
+import palette as P                                               # noqa: E402
+import networkx as nx                                             # noqa: E402
+from hm_rat_analysis import maze                                  # noqa: E402
 
 from hm_rat_analysis import place_fields as PF                    # noqa: E402
 from hm_rat_analysis.reports import session_summary as SS         # noqa: E402
@@ -77,7 +81,7 @@ INK, INK2, MUTED, SURFACE = F1A.INK, F1A.INK2, F1A.MUTED, F1A.SURFACE
 # strip. Validated against this surface: worst pair CVD dE 24.7, normal-vision
 # dE 33.6, all above 3:1 contrast on #fcfcfb. Beyond four animals hue alone stops
 # separating under CVD, so the strip refuses rather than inventing a fifth.
-ANIMAL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+ANIMAL_COLORS = [P.BLUE, P.ORANGE, P.GREEN, P.AMBER]
 BLUE = ANIMAL_COLORS[0]
 #: Within panel b the SECOND dimension is unit quality, carried by lightness of the
 #: animal's own hue (good solid, MUA tinted) rather than by a fifth hue.
@@ -85,12 +89,23 @@ MUA_ALPHA = 0.40
 
 #: Panels b-g, in order: (key, letter, title, y label). The per-unit panels name
 #: the column in the summary's `units` sheet; b and c are session/trial level.
-STRIP = [("units", "B", "Unit yield", "units per session"),
-         ("performance", "C", "Behaviour", "log10(shortest/actual)"),
-         ("spatial_info", "D", "Spatial information", "bits/spike"),
-         ("n_fields", "E", "Place fields", "fields per cell"),
-         ("field_size_mean_cm", "F", "Field size", "cm of track"),
-         ("stability", "G", "Map stability", "split-half r")]
+#: Every per-session quantity the summary produces, in order. The DRAWING machinery
+#: (and its tests) still covers all six — the axis capping, the missing-column
+#: message and the per-animal series are the same code for each.
+ALL_STRIP = [("units", "B", "Unit yield", "units per session"),
+             ("performance", "C", "Behaviour", "log10(shortest/actual)"),
+             ("spatial_info", "D", "Spatial information", "bits/spike"),
+             ("n_fields", "E", "Place fields", "fields per cell"),
+             ("field_size_mean_cm", "F", "Field size", "cm of track"),
+             ("stability", "G", "Map stability", "split-half r")]
+
+#: What the FIGURE draws. Spatial
+#: information, field count, field size and map stability are each confounded with
+#: how much data a session held — ``place_fields.METRIC_NOTES`` says so in as many
+#: words — and a figure that has to earn its page cannot lead with a number that
+#: needs a caveat. Pass `strip=ALL_STRIP` to draw the lot.
+STRIP = [(k, l, t, y) for (k, _old, t, y), l
+         in zip(ALL_STRIP[:3], ("D", "E", "F"))]
 
 #: Panels whose quantity can legitimately be negative, so they get a zero line and
 #: no positive clamp.
@@ -105,6 +120,127 @@ YMAX = {"spatial_info": 5.0, "field_size_mean_cm": 50.0, "performance": 0.0}
 #: A block of sessions is one GOAL location: repeat N is the Nth goal the animal
 #: was trained to, and repeat 0 is the habituation day before any goal was set.
 HABITUATION_REPEAT = 0
+
+#: Width/height of the room photograph, so the page can be laid out before it is read.
+PHOTO_ASPECT = 1.655
+
+
+#: Panel C is the maze as built. It is a PHOTOGRAPH — the one part of this figure
+#: no code can regenerate — carried over from the Illustrator original. Missing,
+#: the panel says so rather than failing the whole figure.
+PHOTO = Path(os.environ.get("MSCA_FIG_DIR",
+                            "/Users/sachuriga/Desktop/MSCA_figures")) / "fig3_panelB.png"
+
+
+def photo_panel(ax, path=None):
+    """The room photograph, or a placeholder that names what is missing."""
+    p = Path(path or PHOTO)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    if not p.exists():
+        ax.add_patch(plt.Rectangle((0, 0), 1, 1, transform=ax.transAxes,
+                                   facecolor=P.FILL, edgecolor=P.RULE, lw=0.6))
+        ax.text(0.5, 0.5, f"photograph not found:\n{p.name}", transform=ax.transAxes,
+                ha="center", va="center", fontsize=FONT["tick"], color=MUTED,
+                linespacing=1.5)
+        ax.axis("off")
+        return False
+    ax.imshow(plt.imread(str(p)), aspect="equal", interpolation="antialiased")
+    for sp in ax.spines.values():
+        sp.set_visible(True)
+        sp.set_color(P.RULE)
+        sp.set_linewidth(0.6)
+    return True
+
+
+#: Panel B: the update manipulation, moved here from figure 2. A barrier on the
+#: bridge nearest the goal turns a short route into a long detour, which is the
+#: single manipulation the whole design turns on — so it leads the figure.
+UPDATE_GOAL, UPDATE_START, UPDATE_BRIDGE = "114", "306", ("121", "302")
+
+#: Margins around the maze in panel A, in metres of maze: the barrier caption sits
+#: in the top band and the route legend in the bottom one. Sized from the two 8 pt
+#: lines each has to hold, not guessed — a guessed margin left 45% of the panel
+#: empty when this drawing moved from a quarter-page inset to the full column.
+UPDATE_PAD_TOP, UPDATE_PAD_BOTTOM, UPDATE_PAD_X = 0.95, 0.55, 0.25
+
+
+def update_panel_aspect():
+    """Width/height of panel A, so the page can be laid out before it is drawn."""
+    pos = maze.idealised_positions(maze.build_graph())
+    xs = [float(p[0]) for p in pos.values()]
+    ys = [-float(p[1]) for p in pos.values()]
+    return ((max(xs) - min(xs) + 2 * UPDATE_PAD_X)
+            / (max(ys) - min(ys) + UPDATE_PAD_TOP + UPDATE_PAD_BOTTOM))
+
+
+def update_maze_panel(ax, scale=1.0):
+    """The update manipulation: a barrier on one bridge, and the detour it forces.
+
+    Drawn from ``hm_rat_analysis.maze``, so the lattice here is the same object as
+    in every other figure of the proposal rather than a traced copy. Returns the
+    two route lengths, in hops, for the caption.
+    """
+    G = maze.build_graph()
+    pos = {n: (float(xy[0]), -float(xy[1]))
+           for n, xy in maze.idealised_positions(G).items()}
+    blocked = G.copy()
+    blocked.remove_edge(*UPDATE_BRIDGE)
+    direct = nx.shortest_path(G, UPDATE_START, UPDATE_GOAL)
+    detour = nx.shortest_path(blocked, UPDATE_START, UPDATE_GOAL)
+
+    for u, v in G.edges():
+        ax.plot([pos[u][0], pos[v][0]], [pos[u][1], pos[v][1]], color=F1A.MAZE_LINE,
+                lw=P.lw(1.2 * scale), zorder=1, solid_capstyle="round")
+    ax.scatter([p[0] for p in pos.values()], [p[1] for p in pos.values()],
+               s=6 * scale ** 2, facecolor=SURFACE, edgecolor=F1A.MAZE_LINE,
+               linewidths=P.lw(0.5 * scale), zorder=2)
+    # the route the rat runs is the maze ACTIVITY, so it takes the maze hue
+    ax.plot([pos[n][0] for n in detour], [pos[n][1] for n in detour], color=P.ORANGE,
+            lw=P.lw(2.4 * scale), zorder=3, solid_capstyle="round")
+    ax.plot([pos[n][0] for n in direct], [pos[n][1] for n in direct], color=INK,
+            lw=P.lw(1.5 * scale), ls=(0, (2.4, 1.8)), zorder=4)
+
+    bx = (pos[UPDATE_BRIDGE[0]][0] + pos[UPDATE_BRIDGE[1]][0]) / 2
+    by = (pos[UPDATE_BRIDGE[0]][1] + pos[UPDATE_BRIDGE[1]][1]) / 2
+    dx = pos[UPDATE_BRIDGE[1]][0] - pos[UPDATE_BRIDGE[0]][0]
+    dy = pos[UPDATE_BRIDGE[1]][1] - pos[UPDATE_BRIDGE[0]][1]
+    L = np.hypot(dx, dy)
+    ux, uy = -dy / L, dx / L
+    ax.plot([bx - ux * 0.18, bx + ux * 0.18], [by - uy * 0.18, by + uy * 0.18],
+            color=P.RED, lw=P.lw(4.0 * scale), zorder=6, solid_capstyle="butt")
+    ax.scatter([pos[UPDATE_GOAL][0]], [pos[UPDATE_GOAL][1]],
+               s=(FONT["tick"] * 1.5) ** 2, color=P.BLUE, zorder=7,
+               edgecolor=SURFACE, linewidth=0.9)
+    ax.text(pos[UPDATE_GOAL][0], pos[UPDATE_GOAL][1], "G", ha="center",
+            va="center", fontsize=FONT["tick"], color="white", fontweight="bold",
+            zorder=8)
+    ax.scatter([pos[UPDATE_START][0]], [pos[UPDATE_START][1]], s=42, color=INK,
+               zorder=7, edgecolor=SURFACE, linewidth=0.8)
+    ax.text(pos[UPDATE_START][0], pos[UPDATE_START][1] + 0.24, "start",
+            ha="center", va="bottom", fontsize=FONT["tick"], color=INK)
+    ax.annotate("barrier on the bridge\nnearest the goal", xy=(bx, by),
+                xytext=(bx + 0.15, by + 0.80), fontsize=FONT["tick"], color=P.RED,
+                ha="center", va="bottom", linespacing=1.25,
+                arrowprops=dict(arrowstyle="->", lw=0.9, color=P.RED,
+                                connectionstyle="arc3,rad=-0.25"))
+    hd = [plt.Line2D([], [], color=INK, lw=1.5, ls=(0, (2.4, 1.8))),
+          plt.Line2D([], [], color=P.ORANGE, lw=2.4)]
+    # _fit_legend drops columns until the legend actually fits: this panel is a
+    # third of the page wide now, and two route names side by side ran off it.
+    _fit_legend(ax, 2, handles=hd,
+                labels=[f"before barrier ({len(direct) - 1} hops)",
+                        f"forced detour ({len(detour) - 1} hops)"],
+                loc="lower center", bbox_to_anchor=(0.5, -0.02), frameon=False,
+                fontsize=FONT["tick"], handlelength=1.7, labelspacing=0.3,
+                labelcolor=INK2, columnspacing=1.6)
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_xlim(min(xs) - UPDATE_PAD_X, max(xs) + UPDATE_PAD_X)
+    ax.set_ylim(min(ys) - UPDATE_PAD_BOTTOM, max(ys) + UPDATE_PAD_TOP)
+    return len(direct) - 1, len(detour) - 1
 
 
 def grid_columns(width, left_in, right_in, hgap_in, n=len(STRIP)):
@@ -143,11 +279,11 @@ MIN_PANEL_IN = 1.5
 #: The column counts tried, widest grid first. Six panels: 3x2, then 2x3, then 6x1.
 GRID_CHOICES = (3, 2, 1)
 
-#: Default page width, INCHES: A4 (210 mm) less 20 mm margins each side. Authoring
+#: Default page width, INCHES: the Part B-1 column, A4 less its 15 mm margins. Authoring
 #: at the width the figure will actually occupy is what makes the type sizes below
 #: mean something — placed at 100% in a document, 9 pt here IS 9 pt on the page.
 #: Scaling the picture in Word afterwards scales the text with it and breaks that.
-A4_TEXT_WIDTH_IN = 170 / 25.4
+A4_TEXT_WIDTH_IN = 180 / 25.4
 
 #: The width this layout's artwork sizes were tuned at. Everything geometric is
 #: scaled by width / REF_WIDTH_IN; the type is NOT (see FONT).
@@ -156,8 +292,8 @@ REF_WIDTH_IN = 15.0
 #: Type sizes in POINTS, all inside the 8-11 pt band that survives print. Absolute
 #: by design: they do not change with page width, so a smaller figure gets smaller
 #: artwork around the same-sized text rather than unreadable 4 pt labels.
-FONT = {"letter": 11, "title": 10, "ylabel": 9, "tick": 8, "group": 8,
-        "legend": 8, "note": 8}
+FONT = P.scale({"letter": 11, "title": 10, "ylabel": 9, "tick": 8, "group": 8,
+                "legend": 8, "note": 8})
 
 
 # ------------------------------------------------------------
@@ -339,6 +475,10 @@ def _frame(ax, letter, title, ylab, meta, pos, highlight=None, show_repeats=True
                 annotation_clip=False)
     ax.set_ylabel(ylab, fontsize=FONT["ylabel"], color=INK2, labelpad=2)
     ax.set_xticks(pos)
+    # This axis carries a dozen slots in a third of the page, so the tick keeps the
+    # session number alone and the goal is named once under its block (see
+    # show_repeats). Figure 2's panel B has room for the whole GL{goal}S{session}
+    # name in each box and uses it.
     ax.set_xticklabels([str(s) for _r, s in meta], fontsize=FONT["tick"], color=INK2)
     ax.set_xlim(pos[0] - 0.75, pos[-1] + 0.75)
     ax.tick_params(length=2.5, pad=2, colors=MUTED, labelcolor=INK2,
@@ -347,8 +487,8 @@ def _frame(ax, letter, title, ylab, meta, pos, highlight=None, show_repeats=True
         ax.spines[s].set_visible(False)
     for s in ("left", "bottom"):
         ax.spines[s].set_color(MUTED)
-        ax.spines[s].set_linewidth(0.8 * scale)
-    ax.grid(axis="y", color=MUTED, lw=0.4 * scale, alpha=0.35, zorder=0)
+        ax.spines[s].set_linewidth(P.lw(0.8 * scale))
+    ax.grid(axis="y", color=MUTED, lw=P.lw(0.4 * scale), alpha=0.35, zorder=0)
     ax.set_axisbelow(True)
 
     if show_repeats:
@@ -376,7 +516,7 @@ def _frame(ax, letter, title, ylab, meta, pos, highlight=None, show_repeats=True
         text_y = _offset_axes(ax, -17 - FONT["tick"])
         for text, (rep, x0, x1) in zip(full, groups):
             ax.plot([x0 - 0.3, x1 + 0.3], [0, 0], transform=rule, color=MUTED,
-                    lw=0.9 * scale, clip_on=False, solid_capstyle="butt")
+                    lw=P.lw(0.9 * scale), clip_on=False, solid_capstyle="butt")
             ax.text((x0 + x1) / 2, 0, text, transform=text_y, ha="center", va="top",
                     fontsize=FONT["group"], color=INK2, clip_on=False)
 
@@ -478,16 +618,16 @@ def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
                 # merging into one blob at print size.
                 ax.scatter(x + dx + np.clip(j, -0.13, 0.13), v,
                            s=max(3.0, 28 * scale ** 2), color=c, alpha=0.50,
-                           edgecolors="white", linewidths=0.5 * scale,
+                           edgecolors="white", linewidths=P.lw(0.5 * scale),
                            zorder=2, rasterized=rasterize)
                 allv.append(v)
         meds = np.array(meds, float)
-        ax.plot(pos + dx, meds, "-", color=c, lw=1.7 * scale, zorder=3,
+        ax.plot(pos + dx, meds, "-", color=c, lw=P.lw(1.7 * scale), zorder=3,
                 label=str(a))
         # a white ring, so a median never disappears into the dots underneath it —
         # the same rim the measurements carry, one step wider
         ax.plot(pos + dx, meds, "o", ms=max(2.6, 6.4 * scale), color=c,
-                mec="white", mew=1.3 * scale, zorder=4)
+                mec="white", mew=P.lw(1.3 * scale), zorder=4)
         lines.append(meds)
 
     # Limits from the data rather than autoscale: a dot sitting exactly on the top
@@ -514,7 +654,7 @@ def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
         if ymax is not None and allv:
             n_over = int((np.concatenate(allv) > top).sum())
     if signed:
-        ax.axhline(0, color=INK2, lw=0.8 * scale, ls=(0, (4, 3)), zorder=1)
+        ax.axhline(0, color=INK2, lw=P.lw(0.8 * scale), ls=(0, (4, 3)), zorder=1)
     return lines, n_over
 
 
@@ -552,8 +692,9 @@ def _prepared_units(summary, animals):
 
 
 def summary_strip(axes, summary, animal=None, si_mode="auto", highlight=None,
-                  rasterize=False, scale=1.0):
-    """Draw panels b-g into `axes` (six of them). Returns the parameter stamp."""
+                  rasterize=False, scale=1.0, strip=None):
+    """Draw one panel per entry of `strip` into `axes`. Returns the parameter stamp."""
+    strip = STRIP if strip is None else strip
     sess, keys, meta, animals = session_axis(summary, animal)
     pos = slot_positions(meta)
     colors = ANIMAL_COLORS[:len(animals)]
@@ -569,7 +710,7 @@ def summary_strip(axes, summary, animal=None, si_mode="auto", highlight=None,
     # carries its own, because it also has to name the quality stack.
     legend_on = {1}
     capped = {}
-    for i, (ax, (key, letter, title, ylab)) in enumerate(zip(axes, STRIP)):
+    for i, (ax, (key, letter, title, ylab)) in enumerate(zip(axes, strip)):
         ymax = YMAX.get(key)
         if key == "spatial_info":
             key, ylab = si_col, si_unit
@@ -683,7 +824,7 @@ def build(out_stem, nwb_path=None, units=None, summary_path=None, animal=None,
     # therefore a scaled value with a floor derived from what it has to contain:
     # bottom_pad holds the tick row and the goal brackets under it; row_gap holds
     # the same brackets plus the next row's title.
-    row_h = max(0.85, 2.25 * scale)
+    row_h = max(0.75, 1.85 * scale)
     row_gap = max(0.80, 1.15 * scale)
     top_pad = max(0.30, 0.55 * scale)
     # what hangs below the bottom row: ticks, then the goal rule and its label, both
@@ -691,30 +832,55 @@ def build(out_stem, nwb_path=None, units=None, summary_path=None, animal=None,
     labels_below = (17 + FONT["tick"] + 2 * FONT["group"]) / 72.0
     bottom_pad = max(1.05 * scale, labels_below + 0.10)
     strip_block = nrow * row_h + (nrow - 1) * row_gap + top_pad + bottom_pad
-    # A band above the maze for the panel letter. Fixed in INCHES: it holds text, and
-    # the correlogram window captions sit just above the maze axes, so a band that
+    # A band above each panel for its letter. Fixed in INCHES: it holds text, and
+    # the correlogram captions sit just above the place-cell axes, so a band that
     # shrank with the page would run into them.
     head_pad = 0.30
     if strip_only:
         height = strip_block + 0.20
-        maze_frac = None
+        top_row_h = 0.0
     else:
-        bbox = data["bbox"]
-        maze_h = (width * 0.99) / ((bbox[1] - bbox[0]) / (bbox[3] - bbox[2]))
-        height = maze_h + head_pad + strip_block + 0.20
-        maze_frac = maze_h / height
+        # ONE row, not two. The maze is a zigzag, so a full-width place-cell panel
+        # wastes its left and right ends on white; giving it two thirds of the row
+        # and stacking the manipulation and the room in the first third costs the
+        # three panels some size and saves a whole row of page.
+        # The two columns are BALANCED so neither is letterboxed: the stacked pair
+        # on the left is as tall as the place-cell maze on the right, which is what
+        # decides the row. Left un-tuned, the pair ran 15 mm taller and that much
+        # of the row was white space above and below the maze.
+        w_a = width * 0.700
+        w_bc = width * 0.272
+        h_a = w_a / ((data["bbox"][1] - data["bbox"][0])
+                     / (data["bbox"][3] - data["bbox"][2]))
+        h_b = w_bc / update_panel_aspect()
+        h_c = w_bc / PHOTO_ASPECT
+        top_row_h = max(h_a, h_b + head_pad + h_c)
+        height = top_row_h + head_pad + strip_block + 0.20
 
     fig = plt.figure(figsize=(width, height), facecolor=SURFACE)
     if not strip_only:
-        ax_a = fig.add_axes([0.005, 1 - maze_frac - head_pad / height, 0.99,
-                             maze_frac])
-        F1A.draw_panel_a(ax_a, data, rasterize=rasterize,
+        # Letters run in READING ORDER, whatever each panel holds: a reader who has
+        # to hunt for "B" above "A" has been given a puzzle instead of a figure.
+        y_row = 1 - (head_pad + top_row_h) / height
+        # the stacked pair on the LEFT, the place cells filling the rest
+        x_bc = 0.005
+        y_a = y_row + (top_row_h - h_b) / height          # manipulation, top of the row
+        ax_a = fig.add_axes([x_bc, y_a, w_bc / width, h_b / height])
+        n_direct, n_detour = update_maze_panel(ax_a, scale=scale * 0.75)
+        print(f"panel a: barrier turns {n_direct} hops into {n_detour}")
+        ax_b = fig.add_axes([x_bc, y_row, w_bc / width, h_c / height])
+        photo_panel(ax_b)
+        ax_c = fig.add_axes([1 - 0.005 - w_a / width,
+                             y_row + (top_row_h - h_a) / height / 2,
+                             w_a / width, h_a / height])
+        F1A.draw_panel_a(ax_c, data, rasterize=rasterize,
                          goal_label_offset=goal_label_offset, scale=scale,
                          fonts=F1A.PRINT_FONT)
-        # Only the letter. Which animal and which day this panel is belongs in the
-        # caption, not on the page — it is printed to stdout when this runs.
-        fig.text(0.006, 1 - 0.055 / height, "A", fontsize=FONT["letter"],
-                 fontweight="bold", color=INK, va="top")
+        for x, yy, letter in ((x_bc, y_a + h_b / height, "A"),
+                              (x_bc, y_row + h_c / height, "B"),
+                              (1 - 0.005 - w_a / width, y_row + top_row_h / height, "C")):
+            fig.text(x, yy + 0.055 / height, letter, fontsize=FONT["letter"],
+                     fontweight="bold", color=INK, va="top")
 
     stamp = si_col = None
     capped = {}

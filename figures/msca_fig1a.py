@@ -23,6 +23,8 @@ import os
 import re
 from pathlib import Path
 
+import sys
+
 import matplotlib
 matplotlib.use("Agg")
 # Text stays TEXT in the PDF/SVG (TrueType, not outlines), so the figure can be
@@ -30,6 +32,10 @@ matplotlib.use("Agg")
 matplotlib.rcParams["pdf.fonttype"] = 42
 matplotlib.rcParams["ps.fonttype"] = 42
 matplotlib.rcParams["svg.fonttype"] = "none"
+# Times New Roman, as figures 2 and 3 use. The stack falls back gracefully on a
+# machine without it: the metrics shift, nothing breaks.
+matplotlib.rcParams["font.family"] = "serif"
+matplotlib.rcParams["mathtext.fontset"] = "stix"
 import matplotlib.patheffects as pe                               # noqa: E402
 import matplotlib.pyplot as plt                                   # noqa: E402
 import networkx as nx                                             # noqa: E402
@@ -37,15 +43,17 @@ import numpy as np                                                # noqa: E402
 from matplotlib import colormaps                                  # noqa: E402
 from pynwb import NWBHDF5IO                                       # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import palette as P                                                # noqa: E402
 from hm_rat_analysis import maze, nwb as nwbio, place_fields as PF  # noqa: E402
 from hm_rat_analysis import spike_metrics as SM                     # noqa: E402
 from hm_rat_analysis.behaviour import moving_average                 # noqa: E402
 
-INK = "#0b0b0b"
-INK2 = "#52514e"
-MUTED = "#8a8985"
-SURFACE = "#fcfcfb"
-MAZE_LINE = "#c9c8c2"
+matplotlib.rcParams["font.serif"] = P.SERIF_STACK
+
+# The proposal's one colour system, shared with figures 2 and 3.
+INK, INK2, MUTED = P.INK, P.INK2, P.MUTED
+SURFACE, MAZE_LINE = P.SURFACE, P.MAZE_LINE
 
 #: Where the finished figures go. Every figure script writes here by default, so
 #: the proposal's artwork collects in one folder instead of wherever the shell
@@ -68,10 +76,10 @@ ACG_SLOW = (0.500, 0.005, "± 500 ms")
 #: 8-11 pt text, and only the artwork around it changes size. PRINT_FONT is that
 #: band; FONT is the original poster sizing, kept as this script's own default so
 #: the standalone figure is unchanged.
-FONT = {"unit": 15, "goal": 13, "scale_bar": 11, "acg_unit": 11,
-        "acg_window": 8.5, "header": 10}
-PRINT_FONT = {"unit": 11, "goal": 10, "scale_bar": 9, "acg_unit": 8,
-              "acg_window": 8, "header": 9}
+FONT = P.scale({"unit": 15, "goal": 13, "scale_bar": 11, "acg_unit": 11,
+                "acg_window": 8.5, "header": 10})
+PRINT_FONT = P.scale({"unit": 11, "goal": 10, "scale_bar": 9, "acg_unit": 8,
+                      "acg_window": 8, "header": 9})
 
 #: Where the "goal N" caption sits relative to the star, in METRES: +x is right,
 #: +y is DOWN on the page (the maze is drawn y-inverted, see panel_maze). The
@@ -394,7 +402,7 @@ def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=18.0,
     a dot keep its size relative to the maze.
     """
     fonts = FONT if fonts is None else fonts
-    lw = lambda w: w * scale                  # noqa: E731 - widths are linear
+    lw = lambda w: P.lw(w * scale)            # noqa: E731 - floored, see palette.MIN_LW
     area = lambda s: s * scale ** 2           # noqa: E731 - marker sizes are areas
 
     G = maze.build_graph()
@@ -482,7 +490,7 @@ def panel_acg(ax, counts, centres, window_ms, rgb, title=None, row_label=None,
         s.set_visible(False)
     ax.spines["bottom"].set_visible(True)
     ax.spines["bottom"].set_color(MUTED)
-    ax.spines["bottom"].set_linewidth(0.8 * scale)
+    ax.spines["bottom"].set_linewidth(P.lw(0.8 * scale))
     if title:
         ax.set_title(title, fontsize=fontsize, fontweight="bold", pad=2,
                      color=to_hex(rgb))

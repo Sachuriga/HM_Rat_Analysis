@@ -47,7 +47,11 @@ def summary():
 
 
 def _strip(summary, **kw):
-    fig, axes = plt.subplots(1, len(FIG.STRIP), figsize=(15, 2))
+    # ALL_STRIP, not STRIP: the figure now draws only the first two panels, but the
+    # capping, missing-column and per-animal behaviour these tests cover is the same
+    # code for all six, and it is still reachable through `strip=`.
+    kw.setdefault("strip", FIG.ALL_STRIP)
+    fig, axes = plt.subplots(1, len(FIG.ALL_STRIP), figsize=(15, 2))
     stamp, si_col, capped = FIG.summary_strip(list(axes), summary, **kw)
     return fig, list(axes), stamp, si_col, capped
 
@@ -58,7 +62,7 @@ def test_every_panel_draws_something(summary):
         # bars in b, dots + a median line in c-g: no panel may come back empty,
         # which is what a renamed summary column would silently produce
         assert len(axes[0].patches) > 0, "panel b drew no bars"
-        for ax, (key, letter, *_rest) in list(zip(axes, FIG.STRIP))[1:]:
+        for ax, (key, letter, *_rest) in list(zip(axes, FIG.ALL_STRIP))[1:]:
             assert ax.collections, f"panel {letter} ({key}) drew no measurements"
             assert ax.lines, f"panel {letter} ({key}) drew no median line"
         assert "bin 2.50 cm" in stamp
