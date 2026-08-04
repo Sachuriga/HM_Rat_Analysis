@@ -48,12 +48,12 @@ def summary():
 
 def _strip(summary, **kw):
     fig, axes = plt.subplots(1, len(FIG.STRIP), figsize=(15, 2))
-    stamp, si_col = FIG.summary_strip(list(axes), summary, **kw)
-    return fig, list(axes), stamp, si_col
+    stamp, si_col, capped = FIG.summary_strip(list(axes), summary, **kw)
+    return fig, list(axes), stamp, si_col, capped
 
 
 def test_every_panel_draws_something(summary):
-    fig, axes, stamp, _ = _strip(summary, animal="Rat6")
+    fig, axes, stamp, _, _capped = _strip(summary, animal="Rat6")
     try:
         # bars in b, dots + a median line in c-g: no panel may come back empty,
         # which is what a renamed summary column would silently produce
@@ -69,7 +69,7 @@ def test_every_panel_draws_something(summary):
 def test_one_animal_is_selected_not_pooled(summary):
     """Panels b-g must show the animal panel a came from, or the unit counts of two
     rats land in one bar and the medians mix two populations."""
-    fig, axes, _, _ = _strip(summary, animal="Rat6")
+    fig, axes, _, _, _capped = _strip(summary, animal="Rat6")
     try:
         heights = sorted({round(p.get_height()) for p in axes[0].patches})
         assert heights == [40, 41, 42, 58, 59, 60], "counts are not one animal's"
@@ -82,7 +82,7 @@ def test_both_animals_share_the_axis_without_being_pooled(summary):
     """Animals are not recorded on the same days, so R{repeat}S{session} is the only
     slot they can share — but they stay separate series on it: one line hiding a
     disagreement between two rats is worse than a busier panel."""
-    fig, axes, _, _ = _strip(summary)                 # default: every animal
+    fig, axes, _, _, _capped = _strip(summary)                 # default: every animal
     try:
         assert len(axes[0].get_xticks()) == 3, "three session slots, not six"
         # panel b: a good and an MUA bar per animal per slot, never summed
@@ -107,7 +107,7 @@ def test_sessions_are_grouped_by_repeat_with_a_gap_between_blocks(summary):
     assert pos[2] - pos[1] > 1.0, "repeat changes: a gap opens"
     assert FIG.repeat_groups(meta, pos) == [(1, pos[0], pos[1]), (2, pos[2], pos[2])]
 
-    fig, axes, _, _ = _strip(s)
+    fig, axes, _, _, _capped = _strip(s)
     try:                                              # ticks carry the session only
         assert [t.get_text() for t in axes[0].get_xticklabels()] == ["1", "2", "3"]
         labels = " ".join(t.get_text() for t in axes[0].texts)
@@ -124,7 +124,7 @@ def test_blocks_are_named_by_goal_and_repeat_zero_is_habituation(summary):
     s = {k: v.copy() for k, v in summary.items()}
     for name in ("sessions", "units", "trials"):
         s[name]["repeat"] = np.where(s[name]["session"] == 1, 0, 1)
-    fig, axes, _, _ = _strip(s)
+    fig, axes, _, _, _capped = _strip(s)
     try:
         labels = " ".join(t.get_text() for t in axes[0].texts)
         assert "habituation" in labels and "goal 1" in labels
@@ -133,20 +133,24 @@ def test_blocks_are_named_by_goal_and_repeat_zero_is_habituation(summary):
         plt.close(fig)
 
 
-def test_capped_panels_say_how_many_measurements_are_above_the_axis(summary):
-    """A capped axis that does not report what it cut shows a tight distribution
-    where there is a long tail."""
+def test_capped_panels_report_how_many_measurements_are_above_the_axis(summary):
+    """The count is not drawn on the panel any more, but it still has to reach the
+    caption: a capped axis reported nowhere shows a tight distribution where there is
+    a long tail."""
     s = {k: v.copy() for k, v in summary.items()}
     # a long tail on top of the fixture's own spread, all of it above the cap
     s["units"].loc[s["units"].index[:5], "field_size_mean_cm"] = 500.0
     cap = FIG.YMAX["field_size_mean_cm"]
-    fig, axes, _, _ = _strip(s)
+    fig, axes, _, si_col, capped = _strip(s)
     try:
         f = axes[4]
         top = f.get_ylim()[1]
         n_over = int((s["units"]["field_size_mean_cm"] > top).sum())
         assert n_over >= 5
-        assert any(f"{n_over} above axis" in t.get_text() for t in f.texts)
+        assert not [t for t in f.texts if "above" in t.get_text()], "note is off-panel"
+        assert capped["Field size"] == (n_over, cap)
+        assert any(f"{n_over} points above it" in line
+                   for line in FIG.confound_notes(si_col, capped))
         # The cap trims the tail, never the result: a median above it would vanish
         # from the panel it is the subject of, so the axis grows to hold the medians.
         ys = np.concatenate([_median_line(f, a).get_ydata() for a in ("Rat5", "Rat6")])
@@ -161,10 +165,10 @@ def test_the_cap_applies_when_no_median_needs_more_room(summary):
     s = {k: v.copy() for k, v in summary.items()}
     s["units"]["field_size_mean_cm"] = 28.0                      # every cell alike
     s["units"].loc[s["units"].index[:3], "field_size_mean_cm"] = 500.0
-    fig, axes, _, _ = _strip(s)
+    fig, axes, _, _, capped = _strip(s)
     try:
         assert axes[4].get_ylim()[1] == pytest.approx(FIG.YMAX["field_size_mean_cm"])
-        assert any("3 above axis" in t.get_text() for t in axes[4].texts)
+        assert capped["Field size"] == (3, FIG.YMAX["field_size_mean_cm"])
     finally:
         plt.close(fig)
 
@@ -183,10 +187,10 @@ def test_more_animals_than_separable_hues_is_refused(summary):
 
 
 def test_spatial_information_prefers_the_count_matched_column(summary):
-    fig, _, _, si_col = _strip(summary, animal="Rat6")
+    fig, _, _, si_col, _capped = _strip(summary, animal="Rat6")
     plt.close(fig)
     assert si_col == "spatial_info_matched"
-    fig, _, _, si_col = _strip(summary, animal="Rat6", si_mode="raw")
+    fig, _, _, si_col, _capped = _strip(summary, animal="Rat6", si_mode="raw")
     plt.close(fig)
     assert si_col == "spatial_info", "--si raw must not be silently upgraded"
 
@@ -196,7 +200,7 @@ def test_a_summary_without_the_new_columns_says_so_instead_of_failing(summary):
     what is missing rather than the figure failing at the last step."""
     summary["units"] = summary["units"].drop(columns=["stability",
                                                       "field_size_mean_cm"])
-    fig, axes, _, _ = _strip(summary, animal="Rat6")
+    fig, axes, _, _, _capped = _strip(summary, animal="Rat6")
     try:
         texts = " ".join(t.get_text() for ax in axes for t in ax.texts)
         assert "stability" in texts and "field_size_mean_cm" in texts
@@ -212,7 +216,7 @@ def _median_line(ax, animal):
 
 def test_missing_per_trial_sheet_falls_back_to_session_medians(summary):
     del summary["trials"]
-    fig, axes, _, _ = _strip(summary, animal="Rat6")
+    fig, axes, _, _, _capped = _strip(summary, animal="Rat6")
     try:
         ys = _median_line(axes[1], "Rat6").get_ydata()
         assert np.isfinite(ys).all() and (ys < 0).all()
@@ -239,7 +243,7 @@ def test_numeric_dates_from_the_workbook_still_match(summary):
         s = {k: v.copy() for k, v in summary.items()}
         for name in ("sessions", "units", "trials"):
             s[name]["date"] = s[name]["date"].astype(cast)
-        fig, axes, _, _ = _strip(s, animal="Rat6")
+        fig, axes, _, _, _capped = _strip(s, animal="Rat6")
         try:
             assert axes[3].collections, f"no per-unit points with {cast} dates"
             assert np.isfinite(axes[3].lines[0].get_ydata()).all()

@@ -17,7 +17,7 @@ median, ``units`` for the per-cell distributions, ``trials`` for the per-trial
 behaviour). Run the summary first; a summary produced before stability and field
 size existed as columns will need re-running for panels f and g.
 
-Panels b-g are a 2 x 3 grid sharing one x axis: a slot per session, ordered by
+Panels b-g share one x axis: a slot per session, ordered by
 repeat, with a GAP wherever the repeat changes so the blocks are visible and the
 tick only has to carry the session number. Session numbers restart inside every
 repeat, so a flat 0..N axis puts R1S4 beside R2S1 with nothing to mark the
@@ -34,7 +34,9 @@ less 20 mm margins, and every type size is fixed in the 8-11 pt band. Points are
 absolute, so a smaller page gets smaller artwork around the same-sized text rather
 than shrunken labels — but only if the figure is inserted at 100%. Rescaling it in
 Word scales the type with it and undoes the whole arrangement; set the picture
-width to 17 cm instead. --width re-authors it for a different column.
+width to 17 cm instead. --width-mm re-authors it for a different column: the type
+stays 8-11 pt and the LAYOUT gives instead — at 110 mm the strip becomes 2 x 3
+rather than 3 x 2, because a third of 110 mm cannot hold a dozen session ticks.
 
 Every animal is drawn on that shared axis, one hue each, as separate series — the
 animals were not recorded on the same days, so repeat/session is the only slot
@@ -54,7 +56,6 @@ Usage:
 
 import argparse
 import sys
-import textwrap
 from pathlib import Path
 
 import matplotlib
@@ -84,25 +85,41 @@ MUA_ALPHA = 0.40
 
 #: Panels b-g, in order: (key, letter, title, y label). The per-unit panels name
 #: the column in the summary's `units` sheet; b and c are session/trial level.
-STRIP = [("units", "b", "Unit yield", "units per session"),
-         ("performance", "c", "Behaviour", "log10(shortest/actual)"),
-         ("spatial_info", "d", "Spatial information", "bits/spike"),
-         ("n_fields", "e", "Place fields", "fields per cell"),
-         ("field_size_mean_cm", "f", "Field size", "cm of track"),
-         ("stability", "g", "Map stability", "split-half r")]
+STRIP = [("units", "B", "Unit yield", "units per session"),
+         ("performance", "C", "Behaviour", "log10(shortest/actual)"),
+         ("spatial_info", "D", "Spatial information", "bits/spike"),
+         ("n_fields", "E", "Place fields", "fields per cell"),
+         ("field_size_mean_cm", "F", "Field size", "cm of track"),
+         ("stability", "G", "Map stability", "split-half r")]
 
 #: Panels whose quantity can legitimately be negative, so they get a zero line and
 #: no positive clamp.
 SIGNED = {"performance", "stability"}
 
 #: Fixed upper limits, where the distribution has a tail long enough to flatten the
-#: part of the axis that carries the result. Every panel that clips says how many
-#: measurements are above it — a capped axis with no such count is a lie by framing.
-YMAX = {"spatial_info": 3.0, "field_size_mean_cm": 50.0}
+#: part of the axis that carries the result. How many measurements each cap puts
+#: outside its panel goes to stdout for the caption — the panels stay unannotated,
+#: so a figure reproduced without its caption does not say what it cut.
+YMAX = {"spatial_info": 5.0, "field_size_mean_cm": 50.0, "performance": 0.0}
 
 #: A block of sessions is one GOAL location: repeat N is the Nth goal the animal
 #: was trained to, and repeat 0 is the habituation day before any goal was set.
 HABITUATION_REPEAT = 0
+
+
+def grid_columns(width, left_in, right_in, hgap_in, n=len(STRIP)):
+    """``(ncol, nrow)`` for the strip at this page width.
+
+    The widest grid whose panels still clear :data:`MIN_PANEL_IN`. This is the one
+    thing that gives when the page narrows, because the alternative — shrinking the
+    type with the page — is what the whole fixed-point-size scheme exists to
+    prevent. At 170 mm the panels are 1.7 in and the strip is 3 x 2; at 110 mm a
+    third of the page is 0.9 in, so it becomes 2 x 3 instead.
+    """
+    for ncol in GRID_CHOICES:
+        if (width - left_in - right_in - hgap_in * (ncol - 1)) / ncol >= MIN_PANEL_IN:
+            break
+    return ncol, -(-n // ncol)
 
 
 def group_label(repeat):
@@ -116,9 +133,15 @@ def group_label_short(repeat):
     point of the fixed band is that every label stays legible in print."""
     return "hab" if repeat == HABITUATION_REPEAT else f"g{repeat}"
 
-#: Panels b-g as a 2 x 3 grid. At figure width a sixth of the page is narrower than
-#: the axis labels it has to carry, and a dozen session slots inside it smear.
-NCOL, NROW = 3, 2
+#: How wide a panel has to be, in INCHES, before it can carry what it must hold: a
+#: dozen session slots with an 8 pt number under each, a 10 pt title, and a legend.
+#: Below this the ticks run together into '1234' and the title is clipped — so the
+#: grid drops a column instead (see :func:`grid_columns`). Type size is never the
+#: thing that gives: points are absolute, and 8 pt is the floor for print.
+MIN_PANEL_IN = 1.5
+
+#: The column counts tried, widest grid first. Six panels: 3x2, then 2x3, then 6x1.
+GRID_CHOICES = (3, 2, 1)
 
 #: Default page width, INCHES: A4 (210 mm) less 20 mm margins each side. Authoring
 #: at the width the figure will actually occupy is what makes the type sizes below
@@ -134,7 +157,7 @@ REF_WIDTH_IN = 15.0
 #: by design: they do not change with page width, so a smaller figure gets smaller
 #: artwork around the same-sized text rather than unreadable 4 pt labels.
 FONT = {"letter": 11, "title": 10, "ylabel": 9, "tick": 8, "group": 8,
-        "legend": 8, "note": 8, "stamp": 8}
+        "legend": 8, "note": 8}
 
 
 # ------------------------------------------------------------
@@ -373,6 +396,27 @@ def _offsets(n, span=0.34):
     return np.linspace(-span, span, n)
 
 
+def _fit_legend(ax, ncol, **kw):
+    """The legend, with `ncol` reduced until it actually fits its panel.
+
+    The legend holds text at a fixed 8 pt while the panel shrinks with the page, so
+    the arrangement that fits at 170 mm runs off the edge at 110 mm and lands on the
+    next panel. Stacking it instead costs height, which the panel has more of.
+
+    Measured against the drawn legend rather than estimated from character counts:
+    the estimate is what decides whether a figure is readable at a given width, and
+    a wrong guess either overflows or stacks a legend that would have fitted.
+    """
+    leg = ax.legend(ncol=ncol, **kw)
+    r = ax.figure.canvas.get_renderer()
+    while ncol > 1 and (leg.get_window_extent(r).width
+                        > ax.get_window_extent(r).width * 0.98):
+        ncol -= 1
+        leg.remove()
+        leg = ax.legend(ncol=ncol, **kw)
+    return leg, ncol
+
+
 def units_panel(ax, sess, keys, pos, animals, colors, scale=1.0):
     """Panel b — units per session: one bar per animal, MUA stacked on good.
 
@@ -394,12 +438,15 @@ def units_panel(ax, sess, keys, pos, animals, colors, scale=1.0):
                linewidth=0, zorder=2, label=f"{a} MUA")
         if np.isfinite(good + mua).any():
             top = max(top, float(np.nanmax(good + mua)))
-    ax.legend(fontsize=FONT["legend"], frameon=False, labelcolor=INK2,
-              handlelength=0.9, handletextpad=0.5, borderpad=0.15,
-              labelspacing=0.25, ncol=len(animals), columnspacing=0.9,
-              loc="upper left")
-    # headroom for the legend's own rows, so it never sits on a bar
-    ax.set_ylim(0, top * (1.34 + 0.10 * len(animals)) if top > 0 else 1)
+    _leg, ncol = _fit_legend(ax, len(animals), fontsize=FONT["legend"], frameon=False,
+                             labelcolor=INK2, handlelength=0.9, handletextpad=0.5,
+                             borderpad=0.15, labelspacing=0.25, columnspacing=0.9,
+                             loc="upper left")
+    # headroom for the legend's own rows, so it never sits on a bar — counted from
+    # the rows it actually ended up with, which is not len(animals) once the legend
+    # has had to stack itself to fit a narrow panel
+    rows = -(-2 * len(animals) // ncol)
+    ax.set_ylim(0, top * (1.15 + 0.10 * rows) if top > 0 else 1)
     return top
 
 
@@ -416,7 +463,7 @@ def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
     """
     rng = np.random.default_rng(seed)
     off = _offsets(len(animals))
-    allv, lines = [], []
+    allv, lines, n_over = [], [], 0
     for a, dx, c in zip(animals, off, colors):
         vals = per_animal.get(a, {})
         meds = []
@@ -426,16 +473,21 @@ def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
             meds.append(float(np.median(v)) if v.size else np.nan)
             if v.size:
                 j = rng.normal(0, 0.05, v.size) if v.size > 1 else np.zeros(1)
+                # A dot big enough to read as a measurement rather than as grain,
+                # with a white rim so a cluster of them stays countable instead of
+                # merging into one blob at print size.
                 ax.scatter(x + dx + np.clip(j, -0.13, 0.13), v,
-                           s=max(0.8, 7 * scale ** 2), color=c, alpha=0.30,
-                           linewidths=0, zorder=2, rasterized=rasterize)
+                           s=max(3.0, 28 * scale ** 2), color=c, alpha=0.50,
+                           edgecolors="white", linewidths=0.5 * scale,
+                           zorder=2, rasterized=rasterize)
                 allv.append(v)
         meds = np.array(meds, float)
         ax.plot(pos + dx, meds, "-", color=c, lw=1.7 * scale, zorder=3,
                 label=str(a))
-        # a surface ring, so a median never disappears into the dots underneath it
-        ax.plot(pos + dx, meds, "o", ms=max(2.2, 5.6 * scale), color=c,
-                mec=SURFACE, mew=1.3 * scale, zorder=4)
+        # a white ring, so a median never disappears into the dots underneath it —
+        # the same rim the measurements carry, one step wider
+        ax.plot(pos + dx, meds, "o", ms=max(2.6, 6.4 * scale), color=c,
+                mec="white", mew=1.3 * scale, zorder=4)
         lines.append(meds)
 
     # Limits from the data rather than autoscale: a dot sitting exactly on the top
@@ -455,17 +507,15 @@ def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
                            if np.isfinite(m).any()), default=-np.inf)
             top = max(ymax, med_max * 1.06 if np.isfinite(med_max) else -np.inf)
         ax.set_ylim(min(lo - pad, 0.0) if signed else 0.0, top)
-        if ymax is not None:
-            # A capped axis that does not say what it cut is a lie by framing: the
-            # reader sees a tight distribution where there is a long tail.
-            n_over = int((np.concatenate(allv) > top).sum()) if allv else 0
-            if n_over:
-                ax.text(0.985, 0.035, f"{n_over} above axis",
-                        transform=ax.transAxes, ha="right", va="bottom",
-                        fontsize=FONT["note"], color=MUTED)
+        # The count of points above the cap is returned rather than drawn on the
+        # panel: it belongs in the caption now. It still has to be said somewhere —
+        # a capped axis that says nothing at all about what it cut shows a tight
+        # distribution where there is a long tail.
+        if ymax is not None and allv:
+            n_over = int((np.concatenate(allv) > top).sum())
     if signed:
         ax.axhline(0, color=INK2, lw=0.8 * scale, ls=(0, (4, 3)), zorder=1)
-    return lines
+    return lines, n_over
 
 
 def _by_animal_key(df, value_col, keys, animals):
@@ -518,6 +568,7 @@ def summary_strip(axes, summary, animal=None, si_mode="auto", highlight=None,
     # data — and at A4 width a legend is a sizeable fraction of a panel. Panel b
     # carries its own, because it also has to name the quality stack.
     legend_on = {1}
+    capped = {}
     for i, (ax, (key, letter, title, ylab)) in enumerate(zip(axes, STRIP)):
         ymax = YMAX.get(key)
         if key == "spatial_info":
@@ -533,17 +584,21 @@ def summary_strip(axes, summary, animal=None, si_mode="auto", highlight=None,
                 # no per-trial sheet: the session medians alone still draw the lines
                 vals = _by_animal_key(sess.assign(performance=sess.get(
                     "performance_med")), "performance", keys, animals)
-            dist_panel(ax, vals, keys, pos, animals, colors, signed=True,
-                       rasterize=rasterize, scale=scale)
+            _, n_over = dist_panel(ax, vals, keys, pos, animals, colors,
+                                   signed=True, ymax=ymax, rasterize=rasterize,
+                                   scale=scale)
         else:
-            dist_panel(ax, _by_animal_key(units, key, keys, animals), keys, pos,
-                       animals, colors, signed=key in SIGNED, ymax=ymax,
-                       rasterize=rasterize, scale=scale)
+            _, n_over = dist_panel(ax, _by_animal_key(units, key, keys, animals),
+                                   keys, pos, animals, colors,
+                                   signed=key in SIGNED, ymax=ymax,
+                                   rasterize=rasterize, scale=scale)
             if units is None or key not in getattr(units, "columns", []):
                 ax.text(0.5, 0.5, f"no '{key}' column\nin this summary\n"
                                   "— re-run hm-session-summary",
                         transform=ax.transAxes, ha="center", va="center",
                         fontsize=FONT["note"], color=MUTED)
+        if n_over:
+            capped[title] = (n_over, ymax)
         if i in legend_on and len(animals) > 1:
             ax.legend(fontsize=FONT["legend"], frameon=False, labelcolor=INK2,
                       handlelength=1.2, borderpad=0.15, loc="best")
@@ -551,17 +606,24 @@ def summary_strip(axes, summary, animal=None, si_mode="auto", highlight=None,
     stamp = SS._param_stamp(sess.to_dict("records"))
     if highlight is not None and highlight in keys:
         stamp += f"  ·  panel a: {highlight}"
-    return stamp, si_col
+    return stamp, si_col, capped
 
 
-def confound_notes(si_col):
-    """The caption's worth of warnings, for stdout rather than for the figure."""
+def confound_notes(si_col, capped=None):
+    """The caption's worth of warnings, for stdout rather than for the figure.
+
+    The capped panels are in here rather than printed on the axes: the panel says
+    nothing about the tail it cut, so the caption has to.
+    """
     keys = [si_col, "n_fields", "field_size_mean_cm", "stability"]
     out = []
     for k in keys:
         note = PF.METRIC_NOTES.get(k, "")
         if note:
             out.append(f"  {k}: {note}")
+    for title, (n, ymax) in sorted((capped or {}).items()):
+        out.append(f"  {title}: axis capped at {ymax:g}; {n} points above it "
+                   f"are outside the panel")
     return out
 
 
@@ -600,23 +662,36 @@ def build(out_stem, nwb_path=None, units=None, summary_path=None, animal=None,
             raise ValueError("panel a needs --nwb and --units (or pass --summary-only)")
         data = F1A.load_session(nwb_path, units, **panel_a_kw)
 
-    ncol, nrow = NCOL, NROW
     scale = width / REF_WIDTH_IN
+    # Margins in INCHES, not fractions: the left one has to hold a 9 pt y label plus
+    # its tick numbers, which do not shrink with the page, so a fractional margin
+    # would swallow them on a narrow figure. They fix the panel width, which is what
+    # decides how many columns the strip can be.
+    left_in = max(0.58, 0.052 * REF_WIDTH_IN * scale)
+    right_in = 0.06
+    hgap_in = max(0.46, 0.075 * REF_WIDTH_IN * scale)
+    ncol, nrow = grid_columns(width, left_in, right_in, hgap_in)
+
+    highlight = _panel_a_slot(summary, data)
+
     # The plotting areas scale with the page; the paddings around them do NOT, or
     # not fully — they hold TEXT, whose size is fixed in points, so a padding that
     # scaled linearly would stop fitting its own labels on a small page. Each is
     # therefore a scaled value with a floor derived from what it has to contain:
-    # bottom_pad holds the tick row, the goal brackets under it and the parameter
-    # stamp under those; row_gap holds the same brackets plus the next row's title.
-    row_h = 2.25 * scale
+    # bottom_pad holds the tick row and the goal brackets under it; row_gap holds
+    # the same brackets plus the next row's title.
+    row_h = max(0.85, 2.25 * scale)
     row_gap = max(0.80, 1.15 * scale)
     top_pad = max(0.30, 0.55 * scale)
-    bottom_pad = max(0.78, 1.05 * scale)
+    # what hangs below the bottom row: ticks, then the goal rule and its label, both
+    # drawn a fixed number of points down (see _frame)
+    labels_below = (17 + FONT["tick"] + 2 * FONT["group"]) / 72.0
+    bottom_pad = max(1.05 * scale, labels_below + 0.10)
     strip_block = nrow * row_h + (nrow - 1) * row_gap + top_pad + bottom_pad
-    # A band above the maze for the panel letter and the session line. Fixed in
-    # INCHES: it holds text, and the correlogram window captions sit just above the
-    # maze axes, so a band that shrank with the page would run into them.
-    head_pad = 0.34
+    # A band above the maze for the panel letter. Fixed in INCHES: it holds text, and
+    # the correlogram window captions sit just above the maze axes, so a band that
+    # shrank with the page would run into them.
+    head_pad = 0.30
     if strip_only:
         height = strip_block + 0.20
         maze_frac = None
@@ -633,37 +708,29 @@ def build(out_stem, nwb_path=None, units=None, summary_path=None, animal=None,
         F1A.draw_panel_a(ax_a, data, rasterize=rasterize,
                          goal_label_offset=goal_label_offset, scale=scale,
                          fonts=F1A.PRINT_FONT)
-        # letter and session on ONE line: stacked, they need more headroom than the
-        # band has once the band is sized for print rather than for a poster.
-        y = 1 - 0.055 / height
-        fig.text(0.006, y, "a", fontsize=FONT["letter"], fontweight="bold",
-                 color=INK, va="top")
-        fig.text(0.006 + 15 / (72 * width), y,
-                 f"Rat {data['animal']}  ·  {data['date']}",
-                 fontsize=F1A.PRINT_FONT["header"], color=INK2, va="top")
+        # Only the letter. Which animal and which day this panel is belongs in the
+        # caption, not on the page — it is printed to stdout when this runs.
+        fig.text(0.006, 1 - 0.055 / height, "A", fontsize=FONT["letter"],
+                 fontweight="bold", color=INK, va="top")
 
     stamp = si_col = None
+    capped = {}
     if summary is not None:
-        # Margins in INCHES for the same reason the paddings are: the left one has
-        # to hold a 9 pt y label plus its tick numbers, which do not shrink with
-        # the page, so a fractional margin would swallow them on a narrow figure.
-        left = max(0.58, 0.052 * REF_WIDTH_IN * scale) / width
-        right = 1 - 0.06 / width
-        hgap = max(0.46, 0.075 * REF_WIDTH_IN * scale) / width
+        left = left_in / width
+        right = 1 - right_in / width
+        hgap = hgap_in / width
         w = (right - left - hgap * (ncol - 1)) / ncol
         axes = []
         for i in range(len(STRIP)):
             r, c = divmod(i, ncol)
             y0 = (bottom_pad + (nrow - 1 - r) * (row_h + row_gap)) / height
             axes.append(fig.add_axes([left + c * (w + hgap), y0, w, row_h / height]))
-        stamp, si_col = summary_strip(axes, summary, animal=animal, si_mode=si_mode,
-                                      highlight=_panel_a_slot(summary, data),
-                                      rasterize=rasterize, scale=scale)
-        # The stamp is a fixed sentence but the page is not, so it is wrapped to the
-        # width actually available rather than left to run off the edge.
-        chars = int((width - left * width - 0.06) * 72 / (0.56 * FONT["stamp"]))
-        fig.text(left, 0.07 / height, "\n".join(textwrap.wrap(stamp, max(30, chars))),
-                 fontsize=FONT["stamp"], color=MUTED, va="bottom", linespacing=1.4)
+        # The parameter stamp is NOT drawn on the page — it goes to stdout below, for
+        # the caption. On the figure it was three lines of 8 pt competing with the
+        # panels for the reader's attention and for the page's bottom margin.
+        stamp, si_col, capped = summary_strip(axes, summary, animal=animal,
+                                              si_mode=si_mode, highlight=highlight,
+                                              rasterize=rasterize, scale=scale)
 
     out_stem = Path(out_stem)
     out_stem.parent.mkdir(parents=True, exist_ok=True)
@@ -673,17 +740,20 @@ def build(out_stem, nwb_path=None, units=None, summary_path=None, animal=None,
     # so labels stay editable in either rather than arriving as outlines.
     kw = dict(transparent=True) if transparent else dict(facecolor=SURFACE)
     written = []
-    for suffix, extra in ((".pdf", {}), (".svg", {}), (".png", dict(dpi=220))):
+    for suffix, extra in ((".pdf", {}), (".svg", {}), (".png", dict(dpi=1200))):
         p = out_stem.with_suffix(suffix)
         fig.savefig(p, **kw, **extra)
         written.append(p)
     plt.close(fig)
     for p in written:
         print(f"wrote {p}  ({p.stat().st_size / 1e6:.1f} MB)")
+    if data is not None:
+        # off the page now, so it has to arrive somewhere the caption can use it
+        print(f"\npanel a: Rat {data['animal']}  ·  {data['date']}")
     if si_col:
         print("\nFor the caption — every panel b-g quantity and what it is "
               "confounded with:")
-        for line in confound_notes(si_col):
+        for line in confound_notes(si_col, capped):
             print(line)
         print(f"  parameters: {stamp}")
     return written
@@ -708,6 +778,12 @@ def main(argv=None):
                     help="page width in INCHES (default %(default).2f = A4 less "
                          "20 mm margins). Place the figure at this width and do "
                          "not rescale it, or the 8-11 pt type rescales with it")
+    ap.add_argument("--width-mm", type=float, default=None,
+                    help="the same width in MILLIMETRES, which is how a journal "
+                         "states its column (e.g. 110). Overrides --width. The type "
+                         "stays 8-11 pt at any width; the grid drops a column "
+                         "instead once a panel would be under "
+                         f"{MIN_PANEL_IN * 25.4:.0f} mm")
     ap.add_argument("--opaque", action="store_true",
                     help="paint the page background instead of leaving it "
                          "transparent (default: transparent, for compositing)")
@@ -731,10 +807,11 @@ def main(argv=None):
                          f"{F1A.GOAL_LABEL_OFFSET[0]:g} {F1A.GOAL_LABEL_OFFSET[1]:g})")
     ap.add_argument("--gamma", type=float, default=2.0)
     a = ap.parse_args(argv)
+    width = a.width_mm / 25.4 if a.width_mm else a.width
     build(a.out, nwb_path=a.nwb, units=a.units, summary_path=a.summary,
           animal=a.animal, si_mode=a.si, strip_only=a.summary_only,
           transparent=not a.opaque, rasterize=a.rasterize_spikes,
-          goal_label_offset=tuple(a.goal_label), width=a.width,
+          goal_label_offset=tuple(a.goal_label), width=width,
           bin_cm=a.bin_cm, min_occ=a.min_occ, sigma=a.sigma, speed_thresh=a.speed,
           gamma=a.gamma, field_frac=a.field_frac, min_field_bins=a.min_field_bins,
           max_jitter=a.max_jitter, palette=a.palette)

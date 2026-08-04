@@ -275,7 +275,7 @@ def break_jumps(xm, ym, max_step_m=0.45):
     return np.insert(x, cut, np.nan), np.insert(y, cut, np.nan)
 
 
-def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=3.2,
+def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=18.0,
                rasterize=True, goal_label_offset=GOAL_LABEL_OFFSET,
                scale=1.0, fonts=None):
     """The maze, the trajectory and every unit's spikes.
@@ -311,8 +311,17 @@ def panel_maze(ax, layers, path_xy, goal_xy, goal_node, bbox, spike_size=3.2,
     for i, lay in enumerate(layers):
         if lay.get("spikes") is not None and len(lay["spikes"][0]):
             sx, sy = lay["spikes"]
-            ax.scatter(sx, sy, s=max(0.45, area(spike_size)), c=[to_hex(lay["rgb"])],
-                       linewidths=0, alpha=0.75, zorder=4 + i, rasterized=rasterize)
+            # A white rim on every spike: with six units overlapping in the same
+            # corridor, an unrimmed dot merges with its neighbours into one mass and
+            # the cloud stops being countable. The rim needs the dot to be big
+            # enough to carry it, which is what spike_size is sized for.
+            # Opaque, so the rim is a clean white ring rather than a wash of
+            # whatever lies under it — the price is that the last unit drawn hides
+            # the ones beneath it wherever they overlap, which the rim makes
+            # legible rather than hiding.
+            ax.scatter(sx, sy, s=max(1.0, area(spike_size)), c=[to_hex(lay["rgb"])],
+                       edgecolors="white", linewidths=max(0.14, lw(0.40)),
+                       alpha=1.0, zorder=4 + i, rasterized=rasterize)
         if lay.get("mask") is not None:
             ax.contour(lay["mask"].astype(float), levels=[0.5],
                        extent=maze.MAZE_EXTENT, origin="lower",
@@ -421,6 +430,25 @@ def empty_corner_boxes(G, pos, bbox, clearance=0.22, grid=(240, 140)):
             (1.0 - w_br, 0.0, w_br, h_br)]
 
 
+def _window_captions(avail_in, fontsize):
+    """The two correlogram windows' names, shortened as a PAIR to fit `avail_in`.
+
+    The caption stays 8 pt whatever the page, but the cell it names shrinks with it,
+    so on a narrow figure the two run into each other. Both are shortened by the
+    same rule even though only one of them is too wide: '20 ms' beside '500' reads
+    as two different quantities, which is worse than losing the unit from both.
+    """
+    fast, slow = ACG_FAST[2], ACG_SLOW[2]
+    variants = [(fast, slow),
+                (fast.replace("± ", ""), slow.replace("± ", "")),
+                (fast.replace("± ", "").replace(" ms", ""),
+                 slow.replace("± ", "").replace(" ms", ""))]
+    for pair in variants:
+        if max(len(t) for t in pair) * 0.56 * fontsize / 72.0 <= avail_in:
+            return pair
+    return variants[-1]
+
+
 def inset_correlograms(ax, layers, boxes, pad=0.018, scale=1.0, fonts=None):
     """Tuck each unit's correlograms into the maze's empty corners.
 
@@ -430,6 +458,7 @@ def inset_correlograms(ax, layers, boxes, pad=0.018, scale=1.0, fonts=None):
     fonts = FONT if fonts is None else fonts
     n = len(layers)
     half = (n + 1) // 2
+    ax_w_in = ax.figure.get_size_inches()[0] * ax.get_position().width
     for bi, (box, group) in enumerate(zip(boxes, (layers[:half], layers[half:]))):
         if not group:
             continue
@@ -439,6 +468,7 @@ def inset_correlograms(ax, layers, boxes, pad=0.018, scale=1.0, fonts=None):
         row_h = bh / len(group)
         lab_w = 0.16 * bw                       # room for the unit number
         cell_w = (bw - lab_w) / 2
+        captions = _window_captions(cell_w * ax_w_in, fonts["acg_window"])
 
         for k, lay in enumerate(group):
             # rows fill downwards inside the box
@@ -461,9 +491,9 @@ def inset_correlograms(ax, layers, boxes, pad=0.018, scale=1.0, fonts=None):
                 # with it on a small page and say nothing new.
                 if k == 0 and bi == 0:
                     ax.text(bx + lab_w + (j + 0.44) * cell_w, by + bh + 0.006,
-                            ACG_FAST[2] if j == 0 else ACG_SLOW[2],
-                            transform=ax.transAxes, ha="center", va="bottom",
-                            fontsize=fonts["acg_window"], color=INK2, zorder=30)
+                            captions[j], transform=ax.transAxes, ha="center",
+                            va="bottom", fontsize=fonts["acg_window"], color=INK2,
+                            zorder=30)
 
 
 def load_session(nwb_path, units, bin_cm=5.0, min_occ=0.25, sigma=1.0,
@@ -576,7 +606,7 @@ def build(nwb_path, units, out_stem, bin_cm=5.0, min_occ=0.25, sigma=1.0,
     out_stem.parent.mkdir(parents=True, exist_ok=True)
     pdf, png = out_stem.with_suffix(".pdf"), out_stem.with_suffix(".png")
     fig.savefig(pdf, facecolor=SURFACE)
-    fig.savefig(png, dpi=220, facecolor=SURFACE)
+    fig.savefig(png, dpi=1200, facecolor=SURFACE)
     plt.close(fig)
     print(f"wrote {pdf}\nwrote {png}")
 
