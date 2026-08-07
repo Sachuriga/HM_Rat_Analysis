@@ -735,7 +735,7 @@ def summary_strip(axes, summary, animal=None, si_mode="auto", highlight=None,
                                    rasterize=rasterize, scale=scale)
             if units is None or key not in getattr(units, "columns", []):
                 ax.text(0.5, 0.5, f"no '{key}' column\nin this summary\n"
-                                  "— re-run hm-session-summary",
+                                  "re-run hm-session-summary",
                         transform=ax.transAxes, ha="center", va="center",
                         fontsize=FONT["note"], color=MUTED)
         if n_over:

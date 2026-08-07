@@ -2,7 +2,7 @@
 cfos/BrdU readout is predicted to do.
 
     A  experiment design: a 25-day build-up phase, then a 3-day testing phase
-    B  predicted cfos/BrdU recruitment at each of the three killing points
+    B  predicted cfos/BrdU recruitment at each of the three key phases
     C  predicted learning dynamics: EBN as a slow integrator, LBN as fast encoding
     D  the same prediction as a trajectory in EBN-LBN state space
 
@@ -22,7 +22,7 @@ Colour and type come from ``figures/palette.py``, shared with figures 1 and 2.
 TYPE NEVER SHRINKS. Every size is in points and floored at ``palette.MIN_PT``, so
 a 110 mm column gets the same 8 pt text as a 170 mm one; what gives instead is the
 LAYOUT — below ``STACK_BELOW_MM`` the side-by-side pairs stack and the three
-killing-point boxes become three rows, because the alternative is 6 pt labels
+key-phase boxes become three rows, because the alternative is 6 pt labels
 nobody can read in print. The page is authored at the width it will be PLACED at:
 insert it at 100% and 8 pt here is 8 pt on the page.
 
@@ -162,7 +162,7 @@ def build_figure(width_mm=180.0):
     axc.axis("off")
 
     #: The 25-day build-up and the 3-day testing phase share one axis but not one
-    #: scale: at a common scale the three killing points would sit inside 2/27 of
+    #: scale: at a common scale the three key phases would sit inside 2/27 of
     #: the width and their labels would overprint. The break mark says where the
     #: scale changes, so a compressed axis is not read as a linear one.
     BREAK_AT, BREAK_X = 24.0, 0.545
@@ -232,9 +232,9 @@ def build_figure(width_mm=180.0):
     # nobody has yet. LBN is the UPPER layer and EBN the lower one, as they sit in
     # the tissue, so the panel reads as a slice rather than a table.
     KP_PANELS = (
-        (C_KP1, "KP1 — old goal (D25, s5)", 5, "active", 0, "silent"),
-        (C_KP2, "KP2 — new goal (D26, s1)", 3, "moderate", 5, "active ↑↑"),
-        (C_KP3, "KP3 — new goal (D27, s2)", 5, "active ↑↑", 1, "fading"),
+        (C_KP1, "KP1: old goal (D25, s5)", 5, "active", 0, "silent"),
+        (C_KP2, "KP2: new goal (D26, s1)", 3, "moderate", 5, "active ↑↑"),
+        (C_KP3, "KP3: new goal (D27, s2)", 5, "active ↑↑", 1, "fading"),
     )
     n_col = 1 if stacked else 3
     bw = 1.0 if stacked else 0.3167
