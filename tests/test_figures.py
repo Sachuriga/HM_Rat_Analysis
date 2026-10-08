@@ -70,12 +70,21 @@ def test_every_panel_draws_something(summary):
         plt.close(fig)
 
 
+def _bars(ax):
+    """The unit-yield bars, without the shaded first-session bands.
+
+    ``ax.axvspan`` puts a Rectangle into ``ax.patches``, the same list the bars
+    live in, so a test that counts patches counts the bands too.
+    """
+    return [p for p in ax.patches if p.get_label() != FIG.BAND_LABEL]
+
+
 def test_one_animal_is_selected_not_pooled(summary):
     """Panels b-g must show the animal panel a came from, or the unit counts of two
     rats land in one bar and the medians mix two populations."""
     fig, axes, _, _, _capped = _strip(summary, animal="Rat6")
     try:
-        heights = sorted({round(p.get_height()) for p in axes[0].patches})
+        heights = sorted({round(p.get_height()) for p in _bars(axes[0])})
         assert heights == [40, 41, 42, 58, 59, 60], "counts are not one animal's"
         assert len(axes[0].get_xticks()) == 3
     finally:
@@ -90,8 +99,9 @@ def test_both_animals_share_the_axis_without_being_pooled(summary):
     try:
         assert len(axes[0].get_xticks()) == 3, "three session slots, not six"
         # panel b: a good and an MUA bar per animal per slot, never summed
-        assert len(axes[0].patches) == 2 * 2 * 3
-        assert round(axes[0].patches[0].get_height()) == 40, "Rat5's own count"
+        bars = _bars(axes[0])
+        assert len(bars) == 2 * 2 * 3
+        assert round(bars[0].get_height()) == 40, "Rat5's own count"
         # panels c-g: one median line (plus its marker line) per animal
         assert {l.get_label() for l in axes[2].lines} >= {"Rat5", "Rat6"}
     finally:
@@ -137,42 +147,46 @@ def test_blocks_are_named_by_goal_and_repeat_zero_is_habituation(summary):
         plt.close(fig)
 
 
-def test_capped_panels_report_how_many_measurements_are_above_the_axis(summary):
-    """The count is not drawn on the panel any more, but it still has to reach the
-    caption: a capped axis reported nowhere shows a tight distribution where there is
-    a long tail."""
+def test_the_cap_never_hides_a_point_that_was_drawn(summary):
+    """Panels c-g draw session MEANS, not individual cells, so a mean above the
+    nominal cap is a result and not a tail: the axis has to grow past the cap to
+    hold it. An axis capped below a drawn point would show a flat series where the
+    data has a spike, which is the one failure a cap must not cause."""
     s = {k: v.copy() for k, v in summary.items()}
-    # a long tail on top of the fixture's own spread, all of it above the cap
+    # a tail big enough to drag the session means it belongs to above the cap
     s["units"].loc[s["units"].index[:5], "field_size_mean_cm"] = 500.0
     cap = FIG.YMAX["field_size_mean_cm"]
-    fig, axes, _, si_col, capped = _strip(s)
+    fig, axes, _, _si_col, capped = _strip(s)
     try:
         f = axes[4]
         top = f.get_ylim()[1]
-        n_over = int((s["units"]["field_size_mean_cm"] > top).sum())
-        assert n_over >= 5
-        assert not [t for t in f.texts if "above" in t.get_text()], "note is off-panel"
-        assert capped["Field size"] == (n_over, cap)
-        assert any(f"{n_over} points above it" in line
-                   for line in FIG.confound_notes(si_col, capped))
-        # The cap trims the tail, never the result: a median above it would vanish
-        # from the panel it is the subject of, so the axis grows to hold the medians.
         ys = np.concatenate([_median_line(f, a).get_ydata() for a in ("Rat5", "Rat6")])
-        assert np.nanmax(ys) <= top
-        assert top >= cap
+        assert np.nanmax(ys) > cap, "fixture did not push a mean above the cap"
+        assert np.nanmax(ys) <= top, "a drawn point is above the axis"
+        assert top > cap, "the axis did not grow to hold it"
+        # Nothing was hidden, so there is nothing for the caption to report.
+        assert "Field size" not in capped
+        assert not [t for t in f.texts if "above" in t.get_text()]
     finally:
         plt.close(fig)
 
 
-def test_the_cap_applies_when_no_median_needs_more_room(summary):
-    """The usual case: medians well inside the cap, so the cap is exactly the top."""
+def test_the_cap_is_the_top_when_every_mean_fits_inside_it(summary):
+    """Where the cap binds it is the top exactly, so the panel keeps the round
+    number the caption quotes instead of a padded one just past it.
+
+    With means rather than individual cells the autoscaled span is usually well
+    inside the cap and the cap does nothing; the one case it still decides is
+    this one, where the series runs close under the cap and the padding would
+    otherwise carry the axis over it.
+    """
     s = {k: v.copy() for k, v in summary.items()}
-    s["units"]["field_size_mean_cm"] = 28.0                      # every cell alike
-    s["units"].loc[s["units"].index[:3], "field_size_mean_cm"] = 500.0
+    cap = FIG.YMAX["field_size_mean_cm"]
+    s["units"]["field_size_mean_cm"] = cap - 2.0
     fig, axes, _, _, capped = _strip(s)
     try:
-        assert axes[4].get_ylim()[1] == pytest.approx(FIG.YMAX["field_size_mean_cm"])
-        assert capped["Field size"] == (3, FIG.YMAX["field_size_mean_cm"])
+        assert axes[4].get_ylim()[1] == pytest.approx(cap)
+        assert "Field size" not in capped, "nothing is above a cap that holds"
     finally:
         plt.close(fig)
 

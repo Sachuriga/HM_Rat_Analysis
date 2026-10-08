@@ -117,6 +117,10 @@ SIGNED = {"performance", "stability"}
 #: so a figure reproduced without its caption does not say what it cut.
 YMAX = {"spatial_info": 5.0, "field_size_mean_cm": 50.0, "performance": 0.0}
 
+#: Patch label for the shaded first-session bands. They share ``ax.patches`` with
+#: the unit-yield bars, so anything counting bars has to skip these.
+BAND_LABEL = "_first_session_band"
+
 #: A block of sessions is one GOAL location: repeat N is the Nth goal the animal
 #: was trained to, and repeat 0 is the habituation day before any goal was set.
 HABITUATION_REPEAT = 0
@@ -530,7 +534,11 @@ def _frame(ax, letter, title, ylab, meta, pos, highlight=None, show_repeats=True
     # a is drawn from, is no longer banded; the caption names it instead.)
     for x, (rep, ses) in zip(pos, meta):
         if rep != HABITUATION_REPEAT and ses == 1:
-            ax.axvspan(x - 0.46, x + 0.46, color=BLUE, alpha=0.10, lw=0, zorder=0)
+            # Labelled because axvspan puts a Rectangle into ax.patches, the same
+            # list the unit-yield bars live in: without a label nothing
+            # downstream can tell a band from a bar.
+            ax.axvspan(x - 0.46, x + 0.46, color=BLUE, alpha=0.10, lw=0, zorder=0,
+                       label=BAND_LABEL)
 
 
 def _offsets(n, span=0.34):
@@ -608,8 +616,11 @@ def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
     separate series — with two rats, one pooled line hiding a disagreement is a
     worse failure than a slightly busier panel.
 
-    `seed`, `ymax` and `rasterize` are accepted for call compatibility; nothing is
-    drawn that they would apply to, so the capped-point count is always 0.
+    `ymax` caps the axis, but only where the cap holds every point that is
+    actually drawn: see the comment at the limits below. `seed` and `rasterize`
+    are accepted for call compatibility; with no individual measurements on the
+    panel there is nothing for them to apply to, and the capped-point count is
+    always 0.
     """
     lines, n_over = [], 0
     lo_all, hi_all = np.inf, -np.inf
@@ -644,6 +655,19 @@ def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
         bottom = min(lo_all - pad, 0.0) if signed else 0.0
         if signed:
             top = max(top, 0.0 + 0.4 * pad)
+        # `ymax` is a nominal cap that keeps one unusually wide session from
+        # flattening the whole panel. It applies only when it BINDS: these points
+        # are session means, not individual cells, so a mean above the cap is a
+        # result rather than a tail, and an axis that hid it would be a figure
+        # showing a flat series where the data has a spike. When the cap is not
+        # applied nothing is hidden, which is why `n_over` stays 0 and no note is
+        # produced: what the means folded in is reported by the confound notes
+        # for the measurements, not by the axis.
+        if ymax:
+            drawn = [v[np.isfinite(v)] for v in lines]
+            drawn = np.concatenate(drawn) if drawn else np.array([])
+            if drawn.size and float(drawn.max()) <= float(ymax):
+                top = min(top, float(ymax))
         ax.set_ylim(bottom, top)
     if signed:
         ax.axhline(0, color=INK2, lw=P.lw(0.8 * scale), ls=(0, (4, 3)), zorder=1)

@@ -40,6 +40,93 @@ MANUAL_EDGES = (
 )
 
 
+#: The maze is four hexagonal islands joined by three long bridges, and the node
+#: id says which island a node is on: 1xx, 2xx, 3xx, 4xx. They are genuinely
+#: separate blocks of space, about 2 m square each, with 0.36 m between
+#: neighbouring nodes inside an island and 0.68 m across a bridge.
+ISLANDS = (1, 2, 3, 4)
+
+#: The corridors between islands, pooled into ONE region. There are five of them:
+#: three short ones (0.68-0.70 m) joining neighbours along the zigzag, and two long
+#: ones (1.86 and 1.99 m) cutting the diagonal. Pooled because a single short
+#: bridge is about fourteen 2.5 cm bins and under 1% of a session's occupancy,
+#: which is not enough for a Skaggs estimate; the five together are ~194 bins and
+#: ~7%, which is.
+BRIDGE = 5
+
+#: Every region ``bin_islands`` can return, besides -1 for none.
+REGIONS = ISLANDS + (BRIDGE,)
+
+#: How far a rate-map bin may sit from the nearest node and still count as being
+#: on that node's island, in METRES. 0.25 m is 0.7 of the within-island node
+#: spacing: it covers the corridors inside an island and cuts the middle of each
+#: bridge, which belongs to no island. Bins beyond it are reported separately
+#: rather than folded into whichever island happens to be nearer.
+ISLAND_BIN_RADIUS_M = 0.25
+
+
+def island_of_node(node_id):
+    """Which island a node is on, from its id: ``312`` -> 3."""
+    return int(node_id) // 100
+
+
+def bridge_edges(G=None):
+    """The maze edges that join two different islands, as ``(a, b)`` id strings."""
+    G = build_graph() if G is None else G
+    return tuple((a, b) for a, b in G.edges()
+                 if island_of_node(a) != island_of_node(b))
+
+
+def _segment_distance(pts, a, b):
+    """Distance from each row of `pts` to the segment a-b."""
+    ab = b - a
+    l2 = float((ab ** 2).sum())
+    if l2 <= 0:
+        return np.linalg.norm(pts - a, axis=1)
+    s = np.clip((pts - a) @ ab / l2, 0.0, 1.0)
+    return np.linalg.norm(pts - (a + s[:, None] * ab), axis=1)
+
+
+def bin_islands(extent, bins, radius_m=ISLAND_BIN_RADIUS_M):
+    """Region index per rate-map bin, as an int array shaped like a rate map.
+
+    1-4 for the islands, :data:`BRIDGE` for any of the five inter-island
+    corridors, ``-1`` for a bin that is near neither. A bin goes to an island when
+    it is within `radius_m` of one of that island's nodes, and to the bridge
+    region only if it is not: the island claim comes first, so the ends of a
+    bridge belong to the islands they leave and only the span between them is
+    bridge.
+
+    The array is indexed ``[iy, ix]`` to match the maps ``place_fields`` builds.
+    """
+    x0, x1, y0, y1 = extent
+    nx, ny = bins
+    cx = x0 + (np.arange(nx) + 0.5) * (x1 - x0) / nx
+    cy = y0 + (np.arange(ny) + 0.5) * (y1 - y0) / ny
+    gx, gy = np.meshgrid(cx, cy)                      # both [ny, nx]
+    nt = node_table()
+    pos = nt[["x_m", "y_m"]].to_numpy()
+    isl = np.array([island_of_node(i) for i in nt["id"]], int)
+    keep = np.isin(isl, ISLANDS)
+    pos, isl = pos[keep], isl[keep]
+    d2 = ((gx[..., None] - pos[:, 0]) ** 2 + (gy[..., None] - pos[:, 1]) ** 2)
+    out = isl[d2.argmin(axis=-1)]
+    far = np.sqrt(d2.min(axis=-1)) > radius_m
+    out[far] = -1
+
+    # Whatever is left over but still lies along a cross-island corridor.
+    nt_idx = nt.set_index("id_str")
+    pts = np.stack([gx.ravel(), gy.ravel()], axis=1)
+    best = np.full(pts.shape[0], np.inf)
+    for a, b in bridge_edges():
+        pa = nt_idx.loc[a, ["x_m", "y_m"]].to_numpy(float)
+        pb = nt_idx.loc[b, ["x_m", "y_m"]].to_numpy(float)
+        best = np.minimum(best, _segment_distance(pts, pa, pb))
+    on_bridge = (best <= radius_m).reshape(ny, nx)
+    out[far & on_bridge] = BRIDGE
+    return out
+
+
 @lru_cache(maxsize=1)
 def node_table():
     """Node coordinates as a DataFrame: ``id, x, y`` (pixels), ``id_str``, and

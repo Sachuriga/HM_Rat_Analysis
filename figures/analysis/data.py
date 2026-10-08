@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from hm_rat_analysis import behaviour, maze
+from hm_rat_analysis import behaviour, islands, maze
 
 #: Where the sessions live, and where the figures go. Both overridable, so the
 #: same code runs against a local copy when the share is not mounted.
@@ -121,6 +121,100 @@ def trials(root=None, cache=True, rebuild=False):
     if cache:
         out.to_csv(cache_file, index=False)
     return out
+
+
+def build_island_si(root=None, progress=True):
+    """Walk every session and return per-unit, per-island spatial information.
+
+    One row per (unit, segment, island) plus ``island = 0`` for the whole maze, so
+    the four values can always be read against the number they decompose.
+
+    Each day the goal changed comes back three times, once whole and once for each
+    side of the switch (see :func:`islands._phase_segments`), so this table
+    carries both the 19-session axis and the 22-block axis the behavioural
+    figures use. A figure picks one by filtering `phase`.
+    """
+    root = ROOT if root is None else Path(root)
+    frames = []
+    sess = list(_sessions(root))
+    for i, (animal, date, d) in enumerate(sess, 1):
+        nwb = next((p for p in sorted(d.glob("*.nwb"))
+                    if not p.name.startswith("._")
+                    and not p.name.endswith(".tmp.nwb")), None)
+        if nwb is None:
+            continue
+        if progress:
+            print(f"  [{i}/{len(sess)}] {animal} {date}", flush=True)
+        try:
+            f = islands.session_island_si(nwb)
+        except Exception as e:                              # noqa: BLE001
+            print(f"      failed: {e}", flush=True)
+            continue
+        if not f.empty:
+            frames.append(f)
+    if not frames:
+        raise FileNotFoundError(f"no island metrics built under {root}")
+    out = pd.concat(frames, ignore_index=True)
+    # `slot` is rebuilt here rather than merged in: the block a row belongs to is
+    # (goal, session, PHASE), and the phase comes from the segment islands.py
+    # scored, not from the behavioural table. Merging the behavioural slot would
+    # give every segment of a split day the same label.
+    meta = (trials(root=root)[["animal", "date", "repeat", "session"]]
+            .drop_duplicates(["animal", "date"]))
+    out["date"] = out["date"].astype(str)
+    meta["date"] = meta["date"].astype(str)
+    out["phase"] = out["phase"].fillna("")
+    out = out.merge(meta, on=["animal", "date"], how="left")
+    out["slot"] = [slot_label(r, s, p) for r, s, p
+                   in zip(out["repeat"], out["session"], out["phase"])]
+    return out
+
+
+def island_si(root=None, cache=True, rebuild=False):
+    """Per-unit, per-island spatial information, from cache when one is there."""
+    root = ROOT if root is None else Path(root)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    f = OUT_DIR / "island_spatial_info.csv"
+    if cache and not rebuild and f.exists():
+        return pd.read_csv(f)
+    out = build_island_si(root)
+    if cache:
+        out.to_csv(f, index=False)
+    return out
+
+
+def slot_goals(df, column="goal_node", by="animal"):
+    """``({slot: "410/204"}, ["Rat5", "Rat6"])``: the goal node per block.
+
+    One node PER ANIMAL, joined in a fixed animal order, because the animals do
+    not share goals: Rat5 runs 410 -> 314 -> 107 -> 219 while Rat6 runs 204 ->
+    109 -> 318 -> 421. A single node per slot would be whichever animal happened
+    to contribute more trials that day, and it would flip from session to session
+    inside one goal.
+
+    The node is the MODE within (slot, animal), so one mistyped ``Goal_Node``
+    cannot relabel a column of the axis: Rat6 GL2S4 has a single 110 among the
+    109s. Slots with no goal are absent from the mapping.
+    """
+    if column not in df.columns:
+        return {}, []
+    d = df[[c for c in ("slot", by, column) if c in df.columns]].dropna()
+    d = d[~d[column].astype(str).isin(("", "nan", "None"))]
+    if d.empty:
+        return {}, []
+    d = d.astype({column: str})
+    if by not in d.columns:
+        g = d.groupby("slot")[column]
+        return {s: v.mode().iat[0] for s, v in g}, []
+    animals = sorted(d[by].unique())
+    per = {(s, a): v.mode().iat[0]
+           for (s, a), v in d.groupby(["slot", by])[column]}
+    out = {}
+    for s in d["slot"].unique():
+        got = [per.get((s, a), "") for a in animals]
+        if any(got):
+            out[s] = "/".join(got)
+    return out, animals
 
 
 def slot_order(df):

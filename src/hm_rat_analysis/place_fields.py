@@ -660,6 +660,91 @@ def _skaggs(lam, p, lam_mean):
     return float(np.nansum(terms))
 
 
+def spatial_info_in(lam, occ_raw, mask):
+    """Skaggs bits/spike over the bins `mask` selects, and nothing else.
+
+    The whole-session value is this with ``mask = visited``; a region's value is
+    this with the region's bins. What changes is the PRIOR: `p` is renormalised
+    over the region, so `lam_mean` becomes the mean rate in that region and the
+    bits are bits about position GIVEN that the animal is there. Bins outside the
+    mask contribute nothing because their prior is zero, so the rate map itself
+    does not have to be rebuilt.
+
+    Returns ``(si, occ_s_in_mask, n_valid_bins_in_mask)``; `si` is NaN where the
+    mask holds no occupancy or the mean rate is zero.
+    """
+    p_occ = np.where(mask, occ_raw, 0.0)
+    tot = float(p_occ.sum())
+    n_bins = int(np.count_nonzero(mask))
+    if tot <= 0:
+        return np.nan, 0.0, n_bins
+    p = p_occ / tot
+    lam_mean = float((p * lam).sum())
+    if lam_mean <= 0:
+        return np.nan, tot, n_bins
+    return _skaggs(lam, p, lam_mean), tot, n_bins
+
+
+def spike_bins(occ, sx, sy):
+    """Bin indices ``(iy, ix)`` of each gated spike, on the occupancy's own grid.
+
+    The same geometry ``np.histogram2d(**occ["hist_kw"])`` uses, so a spike lands
+    in the bin that histogram would have counted it in, and a mask indexed
+    ``mask[iy, ix]`` selects exactly the spikes that fell inside the region.
+    """
+    (xmin, xmax), (ymin, ymax) = occ["hist_kw"]["range"]
+    nx, ny = occ["hist_kw"]["bins"]
+    ix = np.clip(((np.asarray(sx, float) - xmin) / (xmax - xmin) * nx).astype(int),
+                 0, nx - 1)
+    iy = np.clip(((np.asarray(sy, float) - ymin) / (ymax - ymin) * ny).astype(int),
+                 0, ny - 1)
+    return iy, ix
+
+
+def spatial_info_in_matched(occ, sx, sy, mask, visited, n_match, repeats=8, seed=0):
+    """:func:`spatial_info_in` re-estimated from exactly `n_match` spikes in `mask`.
+
+    Skaggs bits/spike is biased UPWARD at low spike counts, and the bias is
+    steep: on this dataset the same cells scored +161% going from 1200 spikes to
+    300. That makes the raw statistic unusable for any comparison across
+    conditions whose spike counts differ, and spike counts here fall
+    systematically as trials shorten with learning, so a rise in raw SI across
+    sessions is partly a fall in exposure. Thinning every estimate to a COMMON
+    count removes that: what is left can still be read as a trend.
+
+    Only the spikes inside `mask` are thinned, and the map is rebuilt on the
+    unchanged occupancy, so this is the regional estimate with its count fixed
+    rather than a whole-session estimate restricted afterwards. NaN when the
+    region holds fewer than `n_match` spikes: a value cannot be matched up.
+    """
+    iy, ix = spike_bins(occ, sx, sy)
+    inside = np.flatnonzero(mask[iy, ix])
+    n_match = int(n_match)
+    if inside.size < n_match or n_match <= 0:
+        return np.nan
+    occ_s, occ_raw, sigma = occ["occ_s"], occ["occ_raw"], occ["sigma"]
+    p_occ = np.where(mask, occ_raw, 0.0)
+    tot = float(p_occ.sum())
+    if tot <= 0:
+        return np.nan
+    p = p_occ / tot
+    gen = np.random.default_rng(seed)
+    vals = []
+    for _ in range(int(repeats)):
+        sel = inside[gen.choice(inside.size, n_match, replace=False)]
+        spk, _, _ = np.histogram2d(sx[sel], sy[sel], **occ["hist_kw"])
+        spk = spk.T
+        if sigma and sigma > 0:
+            spk = gaussian_filter(spk, sigma)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lam = np.where(occ_s > 0, spk / occ_s, 0.0)
+        lam = np.where(visited, lam, 0.0)
+        lam_mean = float((p * lam).sum())
+        if lam_mean > 0:
+            vals.append(_skaggs(lam, p, lam_mean))
+    return float(np.nanmean(vals)) if vals else np.nan
+
+
 def place_field_metrics(x, y, t, spike_times, extent, bins, dt, sigma, speed_thresh,
                         goal_xy=None, t0=None, t1=None,
                         field_frac=DEFAULT_FIELD_FRAC, min_peak_hz=DEFAULT_MIN_PEAK_HZ,

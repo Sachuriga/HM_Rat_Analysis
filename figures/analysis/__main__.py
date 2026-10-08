@@ -1,6 +1,6 @@
 """Draw the analysis figures, one file per plot, into ``data.OUT_DIR``.
 
-    python -m analysis                      # every figure
+    python -m analysis                      # every figure, per animal and combined
     python -m analysis detour_by_session    # just this one
     python -m analysis --rebuild            # re-walk the sessions first
     HM_FIG_DIR=~/Desktop/figs python -m analysis    # somewhere else
@@ -31,8 +31,14 @@ def main(argv=None):
     print(f"figures:  {data.OUT_DIR}")
     trials = data.trials(root=a.root, rebuild=a.rebuild)
     print(f"trials:   {len(trials)} rows")
+    # The spatial-information figures read a SECOND cache, built by walking the
+    # NWB files, and --rebuild has to reach it too: it is the expensive one, so
+    # it is only rebuilt when a figure that needs it was asked for.
+    if a.rebuild and any(n.startswith("island_") for n in names):
+        si = data.island_si(root=a.root, rebuild=True)
+        print(f"island SI: {len(si)} rows")
     for n in names:
-        plots.REGISTRY[n](trials)
+        plots.draw(n, trials)
     return 0
 
 

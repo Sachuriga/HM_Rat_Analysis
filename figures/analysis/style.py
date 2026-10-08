@@ -87,15 +87,29 @@ def first_exposure_slots(slots):
     return out
 
 
-def slot_axis(ax, slots, pos, band_slots=None):
+def slot_axis(ax, slots, pos, band_slots=None, goals=None, animals=()):
     """GL{goal}S{session} on x, rotated, with `band_slots` shaded.
 
     `band_slots` defaults to the first exposure to each goal; pass an explicit set
     to band something else, or an empty set for none.
+
+    `goals` is ``{slot: node}`` from :func:`data.slot_goals`. Where it is given
+    the goal node goes on a second line of each tick, because "GL3" names the
+    third goal without saying where it was: the two animals ran the same goal
+    NUMBERS to different nodes, so a reader comparing this figure to the maze map
+    needs the node and not the number. `animals` names the order the nodes are
+    joined in, and goes in the axis title so the reader knows which is which.
     """
     band = first_exposure_slots(slots) if band_slots is None else set(band_slots)
+    goals = goals or {}
+    labels = [f"{s}\n{goals[s]}" if goals.get(s) else s for s in slots]
     ax.set_xticks(pos)
-    ax.set_xticklabels(slots, rotation=90, fontsize=FS["tick"], color=P.INK)
+    ax.set_xticklabels(labels, rotation=90, fontsize=FS["tick"], color=P.INK)
+    if goals:
+        who = ", ".join(animals) if animals else "goal node"
+        ax.set_xlabel(f"session / goal node ({who})" if animals
+                      else "session / goal node",
+                      fontsize=FS["label"], color=P.INK, labelpad=2)
     ax.set_xlim(pos[0] - 0.8, pos[-1] + 0.8)
     for x, s in zip(pos, slots):
         if s in band:
