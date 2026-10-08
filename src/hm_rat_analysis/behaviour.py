@@ -230,6 +230,68 @@ def trial_performance(work_dir, graph=None):
     return pd.DataFrame(rows, columns=cols)
 
 
+def trial_detour(work_dir, graph=None):
+    """Per-trial path INEFFICIENCY, ``log10(actual hops / optimal hops)``.
+
+    The same quantity as :func:`trial_performance` with the sign the other way up,
+    so 0 is an optimal run and every detour is POSITIVE and reads as a cost. It
+    also repairs two things that make `trial_performance` optimistic on bad trials:
+
+    1. The optimum is measured from the FIRST NODE OF THE RECORDED PATH, not from
+       the ``Start_Nodes`` cell. The two disagree on 6% of trials, and when they
+       do the recorded start is the one the rat was not at, so the optimum is
+       computed for a journey nobody made.
+    2. A trial whose goal never appears in the recorded path is NOT scored.
+       `trial_performance` falls back to the length of the whole sequence, which
+       is sound for a rat that wandered and gave up but absurd when tracking
+       dropped after two nodes: 31 trials in the current dataset are scored that
+       way and 10 of them come out BETTER than optimal.
+
+    `detour` is therefore NaN exactly when the trial cannot be scored, and
+    `reached` says which case a NaN is. A detour slightly below 0 survives only
+    where tracking skipped a node, so the caller may clamp it; this function
+    reports what the data says and leaves that choice alone.
+
+    Returns a DataFrame (``trial``, ``trial_type``, ``start_node``, ``path_start``,
+    ``goal_node``, ``optimal_hops``, ``actual_hops``, ``detour``, ``reached``), one
+    row per trial, empty when the session has no metadata sheet carrying paths.
+    """
+    df, src = _perf_meta_frame(work_dir)
+    cols = ["trial", "trial_type", "start_node", "path_start", "goal_node",
+            "optimal_hops", "actual_hops", "detour", "reached"]
+    if df is None:
+        return pd.DataFrame(columns=cols)
+    G = maze.build_graph() if graph is None else graph
+    rows = []
+    for i, r in enumerate(df.itertuples(index=False), start=1):
+        d = r._asdict()
+        start = _first_int_or_none(d.get("Start_Nodes"))
+        goal = _first_int_or_none(d.get("Goal_Node"))
+        paths = str(d["paths"]) if pd.notna(d.get("paths")) else ""
+        try:
+            ttype = int(d.get("Trial_Type"))
+        except (TypeError, ValueError):
+            ttype = -1
+        seq = [int(v) for v in paths.split(",") if v.strip().lstrip("-").isdigit()]
+        path_start = seq[0] if seq else None
+        reached = bool(seq) and goal is not None and goal in seq
+        optimal = actual = np.nan
+        if reached:
+            actual = seq.index(goal)
+            try:
+                optimal = nx.shortest_path_length(G, str(path_start), str(goal))
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                optimal = np.nan
+        detour = (float(np.log10(actual / optimal))
+                  if np.isfinite(optimal) and np.isfinite(actual)
+                  and optimal > 0 and actual > 0 else np.nan)
+        rows.append({"trial": i, "trial_type": ttype, "start_node": start,
+                     "path_start": path_start, "goal_node": goal,
+                     "optimal_hops": optimal, "actual_hops": actual,
+                     "detour": detour, "reached": reached})
+    return pd.DataFrame(rows, columns=cols)
+
+
 def _first_int_or_none(v):
     """First integer in a scalar or comma-list (``Start_Nodes`` may be '224' or
     '224,315'); None if there is nothing to parse."""
