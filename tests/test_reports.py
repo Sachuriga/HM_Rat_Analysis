@@ -278,3 +278,44 @@ def test_auto_si_match_picks_one_count_that_every_session_can_supply():
     n2, _ = SS.choose_si_match_n([rich, thin], target_frac=1.0)
     assert n2 <= n
     assert SS.choose_si_match_n([], target_frac=0.9)[0] is None
+
+
+# ------------------------------------------------- shared session axis
+def test_summary_pages_use_the_msca_session_axis(monkeypatch):
+    """The per-animal page shares the MSCA figure's axis: one slot per
+    R{repeat}S{session} ordered by repeat then session (not date), a gap where the
+    repeat changes, the tick carrying the session number alone and the goal named
+    once under its block."""
+    import matplotlib.pyplot as plt
+    from hm_rat_analysis import session_axis as SA
+    from hm_rat_analysis.reports import session_summary as SS
+
+    assert SA.parse_slot_label("R2S3") == (2, 3) and SA.parse_slot_label("R<NA>S1") is None
+
+    captured = []
+
+    def fake_save(pdf, fig):
+        ax = fig.axes[0]
+        captured.append(([t.get_text() for t in ax.get_xticklabels()],
+                         " ".join(t.get_text() for t in ax.texts), list(ax.get_xticks())))
+        plt.close(fig)
+    monkeypatch.setattr(SS, "_save", fake_save)
+
+    # listed in an order that agrees with neither the date nor the slot order
+    sessions = [dict(animal="Rat5", date=d, repeat=r, session=s, n_good=10, n_mua=2,
+                     n_pyr=7, n_int=3, spatial_info=1.0, n_pf_units=5)
+                for d, r, s in (("20260626", 1, 4), ("20260622", 0, 1),
+                                ("20260629", 2, 1), ("20260623", 1, 1))]
+    SS._plot_animal(None, "Rat5", sessions)
+    ticks, texts, pos = captured[0]
+    assert ticks == ["1", "1", "4", "1"], "session number alone, in repeat order"
+    assert ("habituation" in texts or "hab" in texts) and "goal 1" in texts and "goal 2" in texts
+    assert pos[2] - pos[1] == pytest.approx(1.0), "same repeat: adjacent"
+    assert pos[1] - pos[0] > 1.0 and pos[3] - pos[2] > 1.0, "repeat changes: a gap opens"
+
+    # a session whose NWB named no repeat: the animal falls back to dated ticks
+    sessions[0]["repeat"] = None
+    captured.clear()
+    SS._plot_animal(None, "Rat5", sessions)
+    ticks, texts, _pos = captured[0]
+    assert ticks[0].startswith("20260622") and "goal" not in texts

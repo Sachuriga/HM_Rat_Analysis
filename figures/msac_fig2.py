@@ -46,7 +46,7 @@ OUT_DIR = Path(os.environ.get("MSCA_FIG_DIR",
 MM = 1 / 25.4
 STACK_BELOW_MM = 100.0
 
-FS = P.scale({"letter": 10.5, "title": 9.0, "body": 8.0, "small": 8.0})
+_FS0 = P.scale({"letter": 10.5, "title": 9.0, "body": 8.0, "small": 8.0})
 
 # ---------------------------------------------------------------- palette
 # Figure 1 spends the four hues on the ANIMAL; this figure has no animals to
@@ -59,7 +59,7 @@ C_PRE, C_POST = "#a6c8ee", "#1c5596"   # sleep: ONE hue at two lightness steps
 C_BAR = P.RED              # the only red: the one element that BLOCKS something
 C_GREY = P.INK2
 
-LINE_MM = 3.4              # one 8 pt line with its leading, in mm
+_LINE_MM0 = 3.4            # one 8 pt line with its leading, in mm
 
 
 def wrap_to(s, avail_mm, pt_size, weight="normal"):
@@ -76,9 +76,19 @@ def fits(s, avail_mm, pt_size, weight="normal"):
     return P.fits_mm(s, avail_mm, pt_size, weight=weight)
 
 
-def build_figure(width_mm=180.0):
-    """The whole figure, authored for a page `width_mm` wide."""
+def build_figure(width_mm=180.0, scale=1.0):
+    """The whole figure, authored for a page `width_mm` wide.
+
+    `scale` tightens the VERTICAL geometry only: panel heights, the gaps
+    between them and panel C's row pitch. Width is left alone on purpose. The
+    day box in panel B is already at the width where "GL1S1" only just fits,
+    so any horizontal reduction costs the session labels, and the labels are
+    the convention this figure exists to carry. Height costs nothing but
+    whitespace, and height is what grew.
+    """
     narrow = width_mm < STACK_BELOW_MM
+    FS = _FS0
+    LINE_MM = _LINE_MM0
     plt.rcParams.update({
         "font.family": "serif", "font.serif": P.SERIF_STACK,
         "mathtext.fontset": "stix",
@@ -87,53 +97,86 @@ def build_figure(width_mm=180.0):
 
     M = 5.0
     inner = width_mm - 2 * M
-    GAP, T_H = 4.5, 4.8
+    GAP, T_H = 4.5 * scale, 4.8 * scale
     LEFT = 26.0 if not narrow else 24.0    # room for the row names beside A and B
 
-    h_a = 25.0 if not narrow else 30.0
+    h_a = (25.0 if not narrow else 30.0) * scale
     # four legend entries fit one row at the full column width
     leg_rows = 1 if width_mm >= 175 else (2 if not narrow else 4)
     # the legend hangs under panel A, clear of its tick labels: 4.5 mm for the
     # ticks plus a line per legend row
-    h_leg = 4.5 + 3.8 * leg_rows
-    h_b = 19.0 if not narrow else 24.0
+    h_leg = (4.5 + 3.8 * leg_rows) * scale
+    h_b = (19.0 if not narrow else 24.0) * scale
 
     # Panel C's height follows its CAPTIONS. They wrap to whatever the page
     # allows, so the wrap is resolved FIRST and the panel is then made tall enough
     # for it — a fixed height is what pushed a three-line caption out of the top of
     # the panel at 110 mm.
-    block_mm = (inner - LEFT) / 9
+    # Panel C's block sequence is defined once, here, because both the panel
+    # geometry and the bracket captions are measured from it. Four goal locations
+    # build the schema; the update phase then alternates a new goal with a barrier,
+    # starting on a new goal, which is why the c-Fos key phases fall at GL5.
+    BLOCKS = [("GL1", C_GL), ("GL2", C_GL), ("GL3", C_GL), ("GL4", C_GL),
+              ("GL5", C_GL), ("bar", C_BAR), ("GL6", C_GL), ("bar", C_BAR),
+              ("GL7", C_GL), ("bar", C_BAR), ("GL8", C_GL), ("bar", C_BAR)]
+    N_BLK, N_BUILD = len(BLOCKS), 4
+    block_mm = (inner - LEFT) / N_BLK
     long_bar = fits("barrier", block_mm - 1.5, FS["small"])
-    brackets = [(0, 4, "schema build-up: 4 goal locations", C_GL),
-                (4, 9, "update: barrier and new goal alternate" if long_bar else
-                 "update: B = barrier, alternating with a new goal", C_BAR)]
+    # The phase label is a BRACKET spanning its own blocks with the caption above
+    # it. A centred caption may only be as wide as twice its distance to the nearer
+    # panel edge, so the wrap is measured against that, not against the span: the
+    # build-up bracket sits near the left edge while its span is wide.
+    PHASES = [(0, N_BUILD, "schema build-up: 4 goal locations", C_GL),
+              (N_BUILD, N_BLK, "update: new goal and barrier alternate" if long_bar else
+               "update: B = barrier, alternating with a new goal", C_BAR)]
+
+    # Which animals are in the maze for which blocks. Three coverage rows, because
+    # the three groups stop at three different points and the text alone makes the
+    # reader hold all three in their head at once. The c-Fos cohort ends two
+    # sessions into GL5, which is what a 0.4-block overhang means; the update pair
+    # is trained but NOT recorded through build-up, drawn faded to say so.
+    Y_BLK = 2.60
+    MM_PER_UNIT = 6.5 * scale  # one data unit of panel C, in mm (type does
+                               # not scale, so caption lines cost more units)
+    ROW_GAP = 0.86
+    # Each group gets its own bracket under the blocks, captioned below it, the same
+    # device the phases use above them. A bracket states an EXTENT, which is the
+    # whole point here: the three groups stop at three different blocks.
+    COVER = [
+        (0.0, N_BUILD + 0.4, "c-Fos", C_TRAIN, "solid"),
+        (0.0, N_BUILD + 5.0, "implant, build-up", C_MAZE, "solid"),
+        (0.0, float(N_BUILD), "trained, no implant", C_MAZE, "dashed"),
+        (float(N_BUILD), float(N_BLK), "implant, update", C_MAZE, "solid"),
+    ]
+    COVER_ROW = [0, 1, 2, 2]   # the update pair's two spans share one row
+    y_cover = [Y_BLK - 0.66 - r * ROW_GAP for r in COVER_ROW]
+    Y_FLOOR = min(y_cover) - 0.20 - LINE_MM / MM_PER_UNIT - 0.05
     caps = []
-    for bx0, bx1, t, _c in brackets:
-        # A CENTRED caption may only be as wide as twice its distance to the
-        # nearer panel edge. Wrapping it to its bracket's SPAN instead is what let
-        # the left one hang off the page: that bracket sits near the edge while
-        # its span is wide.
-        centre_mm = ((bx0 + bx1) / 2 + 0.1) / 9.2 * (inner - LEFT)
+    for bx0, bx1, t, _c in PHASES:
+        centre_mm = ((bx0 + bx1) / 2 + 0.1) / (N_BLK + 0.2) * (inner - LEFT)
         avail = 2 * min(centre_mm, (inner - LEFT) - centre_mm) - 1.5
         caps.append(wrap_to(t, avail, FS["small"], weight="bold"))
     n_cap = max(c.count("\n") + 1 for c in caps)
-    h_c = 12.0 + 3.6 * n_cap
+    Y_BRACKET, Y_CAP = Y_BLK + 0.60, Y_BLK + 0.73
+    y_top_c = Y_CAP + n_cap * LINE_MM / MM_PER_UNIT
+    h_c = (y_top_c - Y_FLOOR) * MM_PER_UNIT
 
 
     height_mm = (M + T_H + h_a + h_leg + GAP + T_H + h_b + GAP + T_H + h_c + M)
     fig = plt.figure(figsize=(width_mm * MM, height_mm * MM), facecolor=P.SURFACE)
 
+    W = width_mm
     def rect(x_mm, y_mm, w_mm_, h_mm_):
-        return fig.add_axes([x_mm / width_mm, y_mm / height_mm,
-                             w_mm_ / width_mm, h_mm_ / height_mm])
+        return fig.add_axes([x_mm / W, y_mm / height_mm,
+                             w_mm_ / W, h_mm_ / height_mm])
 
     def ftitle(letter, text, x_mm, y_mm, avail_mm=None):
-        fig.text(x_mm / width_mm, y_mm / height_mm, letter.upper(),
+        fig.text(x_mm / W, y_mm / height_mm, letter.upper(),
                  fontsize=FS["letter"], fontweight="bold", va="bottom",
                  ha="left", color=P.INK)
         if avail_mm is not None:
             text = wrap_to(text, avail_mm, FS["title"], weight="bold")
-        fig.text((x_mm + 4.6) / width_mm, y_mm / height_mm, text,
+        fig.text((x_mm + 4.6 * scale) / W, y_mm / height_mm, text,
                  fontsize=FS["title"], fontweight="bold", va="bottom",
                  ha="left", color=P.INK, linespacing=1.25)
 
@@ -159,7 +202,7 @@ def build_figure(width_mm=180.0):
         axa.add_patch(Rectangle((x0, Y_SHIFT - 0.30), x1 - x0, 0.60,
                                 facecolor=P.FILL, edgecolor=P.RULE,
                                 linewidth=0.5, zorder=2))
-        label = f"{t}  (2 students)"
+        label = f"{t}  (1 student)"
         if not fits(label, (x1 - x0) * mm_per_h - 2, FS["small"]):
             label = t
         axa.text((x0 + x1) / 2, Y_SHIFT, label, ha="center", va="center",
@@ -227,6 +270,11 @@ def build_figure(width_mm=180.0):
     axb = rect(M + LEFT, y - h_b, inner - LEFT, h_b)
     day_mm = (inner - LEFT) / 14.4
     axb.axvspan(6.55, 13.45, color=P.FILL, zorder=0)
+    # a rule between days: the bars are what carry the schedule, so the day grid is
+    # drawn behind them and kept faint enough not to read as a second data series
+    for d in range(15):
+        axb.plot([d - 0.5, d - 0.5], [-0.55, 3.05], color=P.RULE, lw=0.4,
+                 ls=(0, (1.2, 1.6)), zorder=0)
     for wx, wname in ((2.5, "week 1"), (9.5, "week 2")):
         axb.text(wx, 3.10, wname, ha="center", va="top", fontsize=FS["small"],
                  color=C_GREY)
@@ -281,24 +329,25 @@ def build_figure(width_mm=180.0):
     ftitle("c", "Full experiment, implanted animal: 1 block = 1 week = 5 sessions",
            M, y + 0.6, inner - 6)
     axc = rect(M + LEFT, y - h_c, inner - LEFT, h_c)
-    blocks = [("GL1", C_GL), ("GL2", C_GL), ("GL3", C_GL), ("GL4", C_GL),
-              ("barrier" if long_bar else "B", C_BAR), ("GL5", C_GL),
-              ("barrier" if long_bar else "B", C_BAR), ("GL6", C_GL),
-              ("barrier" if long_bar else "B", C_BAR)]
-    for i, (name, c) in enumerate(blocks):
-        bar(axc, i + 0.05, i + 0.95, 1.0, 0.72, c, name)
-    # the data span is solved so that one caption line is exactly LINE_MM tall,
-    # which is what keeps a wrapped caption inside the panel at any width
-    span = 1.45 / (1 - LINE_MM * n_cap / h_c)
-    for (x0, x1, t, col), cap in zip(brackets, caps):
-        axc.plot([x0 + 0.05, x1 - 0.05], [1.72, 1.72], color=col, lw=0.9)
+    for i, (name, c) in enumerate(BLOCKS):
+        label = ("barrier" if long_bar else "B") if name == "bar" else name
+        bar(axc, i + 0.05, i + 0.95, Y_BLK, 0.72, c, label)
+    for (x0, x1, lab, col, style), yc in zip(COVER, y_cover):
+        ls = (0, (2.2, 1.6)) if style == "dashed" else "-"
+        axc.plot([x0 + 0.05, x1 - 0.05], [yc, yc], color=col, lw=0.9, ls=ls)
         for xx in (x0 + 0.05, x1 - 0.05):
-            axc.plot([xx, xx], [1.64, 1.80], color=col, lw=0.9)
-        axc.text((x0 + x1) / 2, 1.90, cap, ha="center", va="bottom",
+            axc.plot([xx, xx], [yc - 0.08, yc + 0.08], color=col, lw=0.9)
+        axc.text((x0 + x1) / 2, yc - 0.20, lab, ha="center", va="top",
+                 fontsize=FS["small"], color=col, fontweight="bold")
+    for (x0, x1, _t, col), cap in zip(PHASES, caps):
+        axc.plot([x0 + 0.05, x1 - 0.05], [Y_BRACKET, Y_BRACKET], color=col, lw=0.9)
+        for xx in (x0 + 0.05, x1 - 0.05):
+            axc.plot([xx, xx], [Y_BRACKET - 0.08, Y_BRACKET + 0.08], color=col, lw=0.9)
+        axc.text((x0 + x1) / 2, Y_CAP, cap, ha="center", va="bottom",
                  fontsize=FS["small"], color=col, fontweight="bold",
                  linespacing=1.25)
-    axc.set_xlim(-0.1, 9.1)
-    axc.set_ylim(0.45, 0.45 + span)
+    axc.set_xlim(-0.1, N_BLK + 0.1)
+    axc.set_ylim(Y_FLOOR, y_top_c)
     axc.axis("off")
     y -= h_c
 
@@ -313,6 +362,8 @@ def main(argv=None):
     ap.add_argument("out", nargs="?", default="fig2",
                     help="output stem (default %(default)s); a bare name lands in "
                          f"{OUT_DIR}")
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="tighten geometry (type never scales); ~0.85 floor")
     ap.add_argument("--width-mm", type=float, default=180.0,
                     help="page width in MILLIMETRES (default %(default).0f). Type "
                          f"stays at or above {P.MIN_PT:g} pt at any width; the "
@@ -322,7 +373,7 @@ def main(argv=None):
     if not stem.is_absolute() and stem.parent == Path("."):
         stem = OUT_DIR / stem
     stem.parent.mkdir(parents=True, exist_ok=True)
-    fig = build_figure(width_mm=a.width_mm)
+    fig = build_figure(width_mm=a.width_mm, scale=a.scale)
     for ext, extra in (("pdf", {}), ("svg", {}), ("png", dict(dpi=600))):
         fig.savefig(stem.with_suffix(f".{ext}"), facecolor=P.SURFACE, **extra)
     w, h = fig.get_size_inches()

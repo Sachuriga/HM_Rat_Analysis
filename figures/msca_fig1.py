@@ -508,8 +508,12 @@ def _frame(ax, letter, title, ylab, meta, pos, highlight=None, show_repeats=True
         for rep, x0, x1 in groups:
             text = group_label(rep)
             # A label may use its own block plus HALF the gap on either side — the
-            # allowance that lets two neighbours grow without ever meeting.
-            if not _fits(text, (x1 - x0 + 1.85) * in_per_unit, FONT["group"]):
+            # allowance that lets two neighbours grow without ever meeting. Only
+            # HABITUATION is ever shortened: 'goal N' over a four-session block
+            # overshoots that allowance by under a millimetre, and 'g1' next to
+            # 'goal 2' read as two different things.
+            if rep == HABITUATION_REPEAT and not _fits(
+                    text, (x1 - x0 + 1.85) * in_per_unit, FONT["group"]):
                 text = group_label_short(rep)
             full.append(text)
         rule = _offset_axes(ax, -14 - FONT["tick"])
@@ -520,13 +524,13 @@ def _frame(ax, letter, title, ylab, meta, pos, highlight=None, show_repeats=True
             ax.text((x0 + x1) / 2, 0, text, transform=text_y, ha="center", va="top",
                     fontsize=FONT["group"], color=INK2, clip_on=False)
 
-    if highlight is not None and highlight in [f"R{r}S{s}" for r, s in meta]:
-        # The session panel a is drawn from, banded in every panel so the example is
-        # placed among the rest. A band rather than a mark under the axis: the space
-        # below the ticks now belongs to the repeat labels.
-        i = [f"R{r}S{s}" for r, s in meta].index(highlight)
-        ax.axvspan(pos[i] - 0.46, pos[i] + 0.46, color=BLUE, alpha=0.08, lw=0,
-                   zorder=0)
+    # The FIRST session at every goal, banded in every panel: that is the day the
+    # goal moved, so the bands are where the schema update happens and the reader
+    # can follow what each quantity does across it. (`highlight`, the session panel
+    # a is drawn from, is no longer banded; the caption names it instead.)
+    for x, (rep, ses) in zip(pos, meta):
+        if rep != HABITUATION_REPEAT and ses == 1:
+            ax.axvspan(x - 0.46, x + 0.46, color=BLUE, alpha=0.10, lw=0, zorder=0)
 
 
 def _offsets(n, span=0.34):
@@ -586,73 +590,61 @@ def units_panel(ax, sess, keys, pos, animals, colors, scale=1.0):
     # the rows it actually ended up with, which is not len(animals) once the legend
     # has had to stack itself to fit a narrow panel
     rows = -(-2 * len(animals) // ncol)
-    ax.set_ylim(0, top * (1.15 + 0.10 * rows) if top > 0 else 1)
+    # 0.28 per legend row, not 0.10: at 20 sessions the tallest stack sits under the
+    # legend's own columns, and 0.10 left the second legend row printed across it.
+    ax.set_ylim(0, top * (1.15 + 0.28 * rows) if top > 0 else 1)
     return top
 
 
 def dist_panel(ax, per_animal, keys, pos, animals, colors, signed=False, seed=0,
                ymax=None, rasterize=False, scale=1.0):
-    """Panels c-g — every measurement as a dot in its animal's hue, that animal's
-    session median as the line through them.
+    """Panels c-g — one point per session per animal: the session MEAN with its
+    standard error as a bar, joined into a line per animal.
 
-    The median, not the mean: each of these distributions has a long tail made of
-    the cells or trials with the least data behind them, and a mean follows that
-    tail rather than the session. The animals are drawn as separate series rather
-    than pooled — with two rats, one line hiding a disagreement between them is a
+    No individual measurements: with twenty sessions on the axis the per-trial and
+    per-unit clouds of two animals ran into each other and hid the very lines they
+    were meant to support. Summarised, both animals can sit on the SAME x, which is
+    what makes a disagreement between them readable at a glance. The animals stay
+    separate series — with two rats, one pooled line hiding a disagreement is a
     worse failure than a slightly busier panel.
+
+    `seed`, `ymax` and `rasterize` are accepted for call compatibility; nothing is
+    drawn that they would apply to, so the capped-point count is always 0.
     """
-    rng = np.random.default_rng(seed)
-    off = _offsets(len(animals))
-    allv, lines, n_over = [], [], 0
-    for a, dx, c in zip(animals, off, colors):
+    lines, n_over = [], 0
+    lo_all, hi_all = np.inf, -np.inf
+    for a, c in zip(animals, colors):
         vals = per_animal.get(a, {})
-        meds = []
-        for x, k in zip(pos, keys):
+        means, sems = [], []
+        for k in keys:
             v = np.asarray(vals.get(k, []), float)
             v = v[np.isfinite(v)]
-            meds.append(float(np.median(v)) if v.size else np.nan)
-            if v.size:
-                j = rng.normal(0, 0.05, v.size) if v.size > 1 else np.zeros(1)
-                # A dot big enough to read as a measurement rather than as grain,
-                # with a white rim so a cluster of them stays countable instead of
-                # merging into one blob at print size.
-                ax.scatter(x + dx + np.clip(j, -0.13, 0.13), v,
-                           s=max(3.0, 28 * scale ** 2), color=c, alpha=0.50,
-                           edgecolors="white", linewidths=P.lw(0.5 * scale),
-                           zorder=2, rasterized=rasterize)
-                allv.append(v)
-        meds = np.array(meds, float)
-        ax.plot(pos + dx, meds, "-", color=c, lw=P.lw(1.7 * scale), zorder=3,
-                label=str(a))
-        # a white ring, so a median never disappears into the dots underneath it —
-        # the same rim the measurements carry, one step wider
-        ax.plot(pos + dx, meds, "o", ms=max(2.6, 6.4 * scale), color=c,
+            means.append(float(v.mean()) if v.size else np.nan)
+            sems.append(float(v.std(ddof=1) / np.sqrt(v.size)) if v.size > 1 else 0.0)
+        means, sems = np.array(means, float), np.array(sems, float)
+        ok = np.isfinite(means)
+        if ok.any():
+            lo_all = min(lo_all, float((means - sems)[ok].min()))
+            hi_all = max(hi_all, float((means + sems)[ok].max()))
+        # bars first, line and markers on top, so a bar never crosses a marker
+        ax.errorbar(pos, means, yerr=sems, fmt="none", ecolor=c, elinewidth=P.lw(0.9 * scale),
+                    capsize=max(1.2, 2.2 * scale), capthick=P.lw(0.9 * scale), zorder=2)
+        ax.plot(pos, means, "-", color=c, lw=P.lw(1.7 * scale), zorder=3, label=str(a))
+        # a white ring, so a marker stays a marker where the two animals coincide
+        ax.plot(pos, means, "o", ms=max(2.6, 6.4 * scale), color=c,
                 mec="white", mew=P.lw(1.3 * scale), zorder=4)
-        lines.append(meds)
+        lines.append(means)
 
-    # Limits from the data rather than autoscale: a dot sitting exactly on the top
-    # spine reads as a clipped distribution.
-    pool = [v for v in allv] + [m[np.isfinite(m)] for m in lines]
-    pool = [v for v in pool if len(v)]
-    if pool:
-        v = np.concatenate(pool)
-        lo, hi = float(v.min()), float(v.max())
-        pad = 0.10 * (hi - lo) if hi > lo else max(0.1, abs(hi) * 0.1)
-        top = hi + pad
-        if ymax is not None:
-            # The cap trims the TAIL, never the result: a median above it would
-            # vanish from the panel it is the subject of, so the axis grows to hold
-            # the medians even when that means overshooting the requested cap.
-            med_max = max((float(np.nanmax(m)) for m in lines
-                           if np.isfinite(m).any()), default=-np.inf)
-            top = max(ymax, med_max * 1.06 if np.isfinite(med_max) else -np.inf)
-        ax.set_ylim(min(lo - pad, 0.0) if signed else 0.0, top)
-        # The count of points above the cap is returned rather than drawn on the
-        # panel: it belongs in the caption now. It still has to be said somewhere —
-        # a capped axis that says nothing at all about what it cut shows a tight
-        # distribution where there is a long tail.
-        if ymax is not None and allv:
-            n_over = int((np.concatenate(allv) > top).sum())
+    # Limits from mean +/- SEM rather than autoscale, with the zero line kept inside
+    # the panel whenever the quantity can be negative.
+    if np.isfinite(lo_all) and np.isfinite(hi_all):
+        span = hi_all - lo_all
+        pad = 0.12 * span if span > 0 else max(0.1, abs(hi_all) * 0.1)
+        top = hi_all + pad
+        bottom = min(lo_all - pad, 0.0) if signed else 0.0
+        if signed:
+            top = max(top, 0.0 + 0.4 * pad)
+        ax.set_ylim(bottom, top)
     if signed:
         ax.axhline(0, color=INK2, lw=P.lw(0.8 * scale), ls=(0, (4, 3)), zorder=1)
     return lines, n_over

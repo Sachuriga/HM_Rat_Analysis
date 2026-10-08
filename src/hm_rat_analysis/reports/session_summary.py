@@ -2,8 +2,9 @@
 Cross-session summary per animal.
 
 Scans a folder tree for session NWBs (written by the HM_Tracker_2025 pipeline,
-steps w/u), groups them by animal (NWB subject_id), and for each animal plots — as
-a function of session date (labelled with Repeat & Session) —:
+steps w/u), groups them by animal (NWB subject_id), and for each animal plots — on the
+R{repeat}S{session} axis the MSCA figures use (:mod:`hm_rat_analysis.session_axis`:
+one slot per session, a gap between goals, the goal named once under its block) —:
   - number of GOOD and MUA units
   - among GOOD units, number of pyramidal vs interneuron
   - behavioural performance, log10(shortest hops / actual hops) per trial
@@ -63,6 +64,7 @@ from pynwb import NWBHDF5IO                                       # noqa: E402
 from .. import behaviour, maze, nwb as nwbio, spike_metrics as SM, stats   # noqa: E402
 from .. import place_fields as PF                                 # noqa: E402
 from ..place_fields import place_field_metrics                    # noqa: E402
+from .. import session_axis as SA                                 # noqa: E402
 
 try:
     from tqdm import tqdm
@@ -777,6 +779,54 @@ def collect_session(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=0.02,
             pass
 
 
+#: Scatters with more points than this are rasterised in the PDF. Every (trial,
+#: unit) pooled over forty sessions is ~10^5 markers per panel; as vector paths that
+#: is a page Preview cannot render, as one image per panel it is a few hundred kB.
+_RASTER_MIN_PTS = 2000
+#: Resolution of those rasterised layers. Text and axes stay vector regardless.
+_RASTER_DPI = 200
+
+
+def _raster(n):
+    return {"rasterized": n > _RASTER_MIN_PTS}
+
+
+def _save(pdf, fig):
+    """One page. `dpi` only touches the rasterised layers (see :func:`_raster`)."""
+    pdf.savefig(fig, dpi=_RASTER_DPI)
+    plt.close(fig)
+
+
+def _session_slots(sessions):
+    """Sessions in axis order, with the (repeat, session) meta and x of each slot.
+
+    Ordered by repeat then session — the axis of the MSCA figure — whenever every
+    session carries both. A session whose NWB description named neither drops the
+    whole animal back to date order with a date label per tick (meta None).
+    """
+    meta = [(s.get("repeat"), s.get("session")) for s in sessions]
+    if sessions and all(r is not None and ss is not None for r, ss in meta):
+        order = sorted(range(len(sessions)),
+                       key=lambda i: (meta[i][0], meta[i][1], sessions[i]["date"]))
+        sessions = [sessions[i] for i in order]
+        meta = [(int(meta[i][0]), int(meta[i][1])) for i in order]
+        return sessions, meta, SA.slot_positions(meta), None
+    sessions = sorted(sessions, key=lambda s: s["date"])
+    labels = [f"{s['date']}\nR{s['repeat']}·S{s['session']}" for s in sessions]
+    return sessions, None, np.arange(len(sessions), dtype=float), labels
+
+
+def _session_ticks(ax, meta, pos, labels):
+    """The shared session axis (:func:`hm_rat_analysis.session_axis.decorate`), or
+    the date-labelled fallback when the sessions' repeat/session are unknown."""
+    if len(pos) == 0:
+        return
+    if meta is not None:
+        SA.decorate(ax, meta, pos)
+    else:
+        ax.set_xticks(pos); ax.set_xticklabels(labels, fontsize=6)
+
+
 def _param_stamp(sessions):
     """One-line record of the parameters a figure/table was produced with. Every
     plotted metric except the unit counts moves with bin size and smoothing, so a
@@ -791,10 +841,8 @@ def _param_stamp(sessions):
 
 
 def _plot_animal(pdf, animal, sessions, units_df=None):
-    sessions = sorted(sessions, key=lambda s: s["date"])
+    sessions, meta, x, labels = _session_slots(sessions)
     dates = [s["date"] for s in sessions]
-    x = np.arange(len(sessions))
-    labels = [f"{s['date']}\nR{s['repeat']}·S{s['session']}" for s in sessions]
 
     def col(key):
         return np.array([s.get(key) if s.get(key) is not None else np.nan
@@ -837,7 +885,7 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
     if any_dec:
         axd.set_title("decoding accuracy (median error)"); axd.set_ylabel("error (m)")
         axd.legend(fontsize=6, ncol=2)
-        axd.set_xticks(x); axd.set_xticklabels(labels, fontsize=6)
+        _session_ticks(axd, meta, x, labels)
         axd.spines["top"].set_visible(False); axd.spines["right"].set_visible(False)
         axd.set_ylim(bottom=0)
     else:
@@ -863,7 +911,7 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
         axp.set_title("behavioural performance  log10(shortest/actual hops)")
         axp.set_ylabel("0 = optimal route")
         axp.legend(fontsize=6)
-        axp.set_xticks(x); axp.set_xticklabels(labels, fontsize=6)
+        _session_ticks(axp, meta, x, labels)
         axp.spines["top"].set_visible(False); axp.spines["right"].set_visible(False)
         for xi, (vi, ni) in enumerate(zip(col("performance_med"), col("performance_n_trials"))):
             if np.isfinite(vi) and np.isfinite(ni):
@@ -904,7 +952,7 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
                         color="#b2182b" if p < 0.05 else "0.3")
     keys = [None, None] + [k for k, _t, _y in _PF_PLOT]
     for ax, key in zip([axes[0, 0], axes[0, 1]] + metric_axes, keys):
-        ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=6, rotation=0)
+        _session_ticks(ax, meta, x, labels)
         ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
         # Counts and rates start at 0; a correlation does not — clamping stability
         # to positive r would hide exactly the sessions where the map did not repeat.
@@ -914,7 +962,7 @@ def _plot_animal(pdf, animal, sessions, units_df=None):
     fig.suptitle(f"{animal} — cross-session summary ({len(sessions)} sessions, "
                  f"{windowed} trial-windowed)\n{_param_stamp(sessions)}", fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    pdf.savefig(fig); plt.close(fig)
+    _save(pdf, fig)
 
 
 def _plot_scatter(pdf, animal, units):
@@ -925,8 +973,9 @@ def _plot_scatter(pdf, animal, units):
     for sub, c in SUBTYPE_COLORS.items():
         d = units[units["subtype"] == sub]
         axa.scatter(d["trough_to_peak_s"] * 1e3, d["acg_tau_rise_ms"], s=14, alpha=0.6,
-                    c=c, label=f"{sub} (n={len(d)})")
-        axb.scatter(d["trough_to_peak_s"] * 1e3, d["firing_rate_hz"], s=14, alpha=0.6, c=c)
+                    c=c, label=f"{sub} (n={len(d)})", **_raster(len(d)))
+        axb.scatter(d["trough_to_peak_s"] * 1e3, d["firing_rate_hz"], s=14, alpha=0.6,
+                    c=c, **_raster(len(d)))
     axa.axvline(SM.TROUGH_PEAK_THRESH_S * 1e3, ls="--", c="grey", lw=1)
     axa.axhline(SM.ACG_TAU_RISE_THRESH_MS, ls="--", c="grey", lw=1)
     axa.set_xlabel("trough-to-peak (ms)"); axa.set_ylabel("ACG tau_rise (ms)")
@@ -939,7 +988,7 @@ def _plot_scatter(pdf, animal, units):
         ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
     fig.suptitle(f"{animal} — all good units ({len(units)}) across sessions", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    pdf.savefig(fig); plt.close(fig)
+    _save(pdf, fig)
 
 
 def _label_order(labels):
@@ -980,7 +1029,11 @@ def _plot_combined(pdf, units_all):
         sess = _session_level(d, "session_label", key)             # per-session, test
         labs = [l for l in _label_order(groups) if len(groups[l])]
         data = [groups[l] for l in labs]
-        xx = np.arange(len(labs))
+        meta = [SA.parse_slot_label(l) for l in labs]
+        if labs and all(m is not None for m in meta):
+            xx = SA.slot_positions(meta)
+        else:
+            meta, xx = None, np.arange(len(labs), dtype=float)
         if data:
             ax.boxplot(data, positions=xx, widths=0.6, showfliers=False)
             ax.plot(xx, [np.median(sess.get(l, [np.nan])) if len(sess.get(l, []))
@@ -1000,7 +1053,7 @@ def _plot_combined(pdf, units_all):
             ax.text(0.02, 0.97, note, transform=ax.transAxes, ha="left", va="top",
                     fontsize=6, color="#b2182b")
         ax.set_title(title); ax.set_ylabel(ylab)
-        ax.set_xticks(xx); ax.set_xticklabels(labs, fontsize=7)
+        _session_ticks(ax, meta, xx, labs)
         if key not in _SIGNED_METRICS:
             ax.set_ylim(bottom=0)
         ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
@@ -1009,7 +1062,7 @@ def _plot_combined(pdf, units_all):
                  f"boxes are units (display only); tests are session-level",
                  fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    pdf.savefig(fig); plt.close(fig)
+    _save(pdf, fig)
 
 
 def _constant_within_groups(g, tol=1e-9):
@@ -1193,9 +1246,11 @@ def _tu_corr_grid(pdf, data, title, color_col="animal"):
                 for i, cval in enumerate(cats):
                     dd = d[d[color_col] == cval]
                     ax.scatter(dd[col], dd["performance"], s=12, alpha=0.45,
-                               edgecolor="none", color=cmap(i % 10), label=str(cval))
+                               edgecolor="none", color=cmap(i % 10), label=str(cval),
+                               **_raster(len(d)))
             else:
-                ax.scatter(d[col], d["performance"], s=12, alpha=0.45, edgecolor="none")
+                ax.scatter(d[col], d["performance"], s=12, alpha=0.45, edgecolor="none",
+                           **_raster(len(d)))
             r, p = pearsonr(d[col], d["performance"])
             b, a = np.polyfit(d[col], d["performance"], 1)
             xs = np.linspace(d[col].min(), d[col].max(), 50)
@@ -1217,7 +1272,7 @@ def _tu_corr_grid(pdf, data, title, color_col="animal"):
         axes.ravel()[0].legend(fontsize=6, markerscale=1.6, loc="best")
     fig.suptitle(f"{title}\n{_TU_CONFOUND_NOTE}", fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
-    pdf.savefig(fig); plt.close(fig)
+    _save(pdf, fig)
 
 
 def _tu_compare_page(pdf, tu_all):
@@ -1282,13 +1337,14 @@ def _tu_compare_page(pdf, tu_all):
             for xi, dd in enumerate(data, 1):
                 if len(dd):
                     axb.scatter(np.random.default_rng(0).normal(xi, 0.05, len(dd)), dd,
-                                s=6, alpha=0.35, color="#2166ac", edgecolor="none")
+                                s=6, alpha=0.35, color="#2166ac", edgecolor="none",
+                                **_raster(len(dd)))
         axb.set_title(lab, fontsize=8); axb.grid(axis="y", alpha=0.3)
         axb.tick_params(labelsize=7)
     fig.suptitle(f"Trial-type comparison (units: {qsel.replace('_', '+')})",
                  fontsize=12, y=0.995)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    pdf.savefig(fig); plt.close(fig)
+    _save(pdf, fig)
 
 
 def _plot_trial_unit_pool(pdf, tu_all):
