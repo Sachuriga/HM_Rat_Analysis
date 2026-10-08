@@ -33,6 +33,12 @@ HABITUATION_REPEAT = 0
 #: efficiency: type 5 runs at a median detour of 0.99, a ten-fold route.
 GOAL_TRIAL_TYPE = 1
 
+#: An unreached trial with this many nodes or fewer is a recording that stopped,
+#: not a rat that searched: the unreached trials split at a clean gap between
+#: three nodes and seven. Those are missing data and leave the success rate
+#: entirely; a rat that walked 52 nodes without finding the goal did not.
+TRACKING_MIN_NODES = 4
+
 #: The free-roaming period that introduces the NEW goal, and the only trial type
 #: that appears exactly once in each of the six (goal > 1, session 1) sessions.
 #: The goal node switches across it, so the goal trials before it are the last
@@ -141,7 +147,40 @@ def goal_trials(df):
     out = out[out["trial_type"] == GOAL_TRIAL_TYPE]
     out = out.sort_values(["animal", "slot", "trial"]).copy()
     out["trial_rank"] = out.groupby(["animal", "slot"]).cumcount() + 1
+    # A trial counts towards success only if we can tell what the rat did.
+    out["tracking_ok"] = (out["reached"].astype(bool)
+                          | (out["path_nodes"] >= TRACKING_MIN_NODES))
     return out
+
+
+def completion(df):
+    """Per block and animal: how often the goal was reached, and when first.
+
+    Returns a frame indexed by ``(animal, slot)`` with ``n`` scoreable trials,
+    ``success_rate``, ``first_success`` (the rank of the first trial that reached
+    the goal, among trials we can score) and ``failures``.
+
+    Trials whose recording stopped are out of BOTH the numerator and the
+    denominator: counting them as failures would make this a figure about
+    tracking. How many were dropped comes back in `notes` so the caption can
+    say so.
+    """
+    g = goal_trials(df)
+    dropped = int((~g["tracking_ok"]).sum())
+    ok = g[g["tracking_ok"]].copy()
+    ok["rank_ok"] = ok.groupby(["animal", "slot"]).cumcount() + 1
+    grp = ok.groupby(["animal", "slot"])
+    out = grp.agg(n=("reached", "size"),
+                  success_rate=("reached", "mean"),
+                  failures=("reached", lambda v: int((~v.astype(bool)).sum())))
+    hit = ok[ok["reached"].astype(bool)].groupby(["animal", "slot"])["rank_ok"].min()
+    out["first_success"] = hit
+    notes = {"goal_trials": len(g), "scored": len(ok),
+             "tracking_dropouts": dropped,
+             "blocks_with_a_failure": int((out["failures"] > 0).sum()),
+             "blocks_needing_more_than_one": int((out["first_success"] > 1).sum()),
+             "blocks_never_solved": int(out["first_success"].isna().sum())}
+    return out.reset_index(), notes
 
 
 def scorable(df):
@@ -154,6 +193,13 @@ def scorable(df):
     n = len(df)
     unreached = int((~df["reached"].astype(bool)).sum())
     kept = df[df["detour"].notna()].copy()
+    # Rank among the trials that SUCCEEDED, alongside the rank among all of them.
+    # The first-trial figures count in successes: the first trial of a block is
+    # often a trial the rat failed, and a figure of route efficiency can only
+    # speak about routes that reached the goal. `trial_rank` is kept so the
+    # figures can say HOW FAR into the block each point actually came from, and
+    # `trials_to_first_success` carries the failures themselves.
+    kept["success_rank"] = kept.groupby(["animal", "slot"]).cumcount() + 1
     # Only tracking that skipped a node can beat the optimum; clamp, do not drop,
     # or the best trials are the ones that leave the figure.
     neg = int((kept["detour"] < -1e-9).sum())

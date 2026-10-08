@@ -258,7 +258,7 @@ def trial_detour(work_dir, graph=None):
     """
     df, src = _perf_meta_frame(work_dir)
     cols = ["trial", "trial_type", "start_node", "path_start", "goal_node",
-            "optimal_hops", "actual_hops", "detour", "reached"]
+            "optimal_hops", "actual_hops", "detour", "reached", "path_nodes"]
     if df is None:
         return pd.DataFrame(columns=cols)
     G = maze.build_graph() if graph is None else graph
@@ -288,7 +288,8 @@ def trial_detour(work_dir, graph=None):
         rows.append({"trial": i, "trial_type": ttype, "start_node": start,
                      "path_start": path_start, "goal_node": goal,
                      "optimal_hops": optimal, "actual_hops": actual,
-                     "detour": detour, "reached": reached})
+                     "detour": detour, "reached": reached,
+                     "path_nodes": len(seq)})
     return pd.DataFrame(rows, columns=cols)
 
 
