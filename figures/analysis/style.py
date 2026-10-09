@@ -56,7 +56,97 @@ def new_figure(width_mm=180.0, height_mm=70.0, left_mm=18.0, right_mm=3.0,
                    labelsize=FS["tick"])
     ax.grid(axis="y", color=P.MUTED, lw=P.lw(0.4), alpha=0.35, zorder=0)
     ax.set_axisbelow(True)
+    # Kept so an inset can be placed in absolute mm without the call site having
+    # to repeat the page size.
+    fig.mm_size = (float(width_mm), float(height_mm))
     return fig, ax
+
+
+def maze_inset(fig, colours, bridge_colour=None, bridge_dashes=None,
+               width_mm=34.0, right_mm=2.0, top_mm=1.0, lw=1.0):
+    """A mini HexMaze in the figure's top margin, each island in its own colour.
+
+    The four islands are named "left" to "right" in the legend, which says where
+    they are only if the reader already knows the maze is a zigzag: island 4 is
+    top-left, 3 bottom-left-of-centre, 2 top-right-of-centre, 1 bottom-right.
+    Drawing the map in the same colours removes that step. The bridges take the
+    bridge line's own colour and dash, so all six series on a figure can be found
+    on it.
+
+    Edges rather than nodes: at 34 mm wide a 96-node scatter is a smudge, while
+    the edges inside an island fuse into one readable block of colour. The
+    geometry is the real one, from ``maze.node_positions_m``, so an island's
+    position on the map is where the animal actually ran.
+
+    The y axis is INVERTED. The node coordinates are derived from video pixels,
+    where y counts downward from the top of the frame, so plotting them with y
+    upward prints the maze mirrored about its long side. Inverting puts it back
+    the way round the maze is. x is untouched, and has to be: it is what makes
+    island 1 the right-hand one, which is what the legend calls it.
+
+    Each island carries its number, placed clear of the lattice on the outer side
+    so it does not sit on the lines.
+
+    Call it AFTER the main axes exist, with a `top_mm` on `new_figure` large
+    enough to hold it: it is placed in the margin, never over the data.
+    """
+    from hm_rat_analysis import maze
+
+    G = maze.build_graph()
+    pos = maze.node_positions_m()
+    if not pos or G.number_of_edges() == 0:
+        return None
+    fw, fh = getattr(fig, "mm_size", (180.0, 70.0))
+    x0, x1, y0, y1 = maze.MAZE_EXTENT
+    pad = 0.55                       # metres of room for the island numbers
+    h_mm = width_mm * ((y1 - y0) + 2 * pad) / (x1 - x0)
+    ax = fig.add_axes([(fw - right_mm - width_mm) / fw,
+                       1 - (top_mm + h_mm) / fh,
+                       width_mm / fw, h_mm / fh])
+    ax.set_facecolor("none")
+    bridges = {frozenset((str(a), str(b))) for a, b in maze.bridge_edges(G)}
+    for a, b in G.edges():
+        ka, kb = int(a), int(b)
+        if ka not in pos or kb not in pos:
+            continue
+        xs = (pos[ka][0], pos[kb][0])
+        ys = (pos[ka][1], pos[kb][1])
+        if frozenset((str(a), str(b))) in bridges:
+            ax.plot(xs, ys, color=bridge_colour or P.INK, lw=P.lw(lw * 0.75),
+                    dashes=bridge_dashes or (2.0, 1.4), zorder=2,
+                    solid_capstyle="round")
+        else:
+            ax.plot(xs, ys, color=colours.get(maze.island_of_node(a)) or P.MUTED,
+                    lw=P.lw(lw), zorder=3, solid_capstyle="round")
+    # One label per island, on the side away from the middle of the maze so it
+    # clears the lattice. Computed in DATA coordinates and then read through the
+    # inverted axis, so "outward" stays outward on the page.
+    mid = 0.5 * (y0 + y1)
+    for k in maze.ISLANDS:
+        pts = [pos[n] for n in pos if maze.island_of_node(n) == k]
+        if not pts:
+            continue
+        cx = sum(q[0] for q in pts) / len(pts)
+        cy = sum(q[1] for q in pts) / len(pts)
+        # The anchor goes outside the island and the text grows AWAY from it.
+        # Vertical alignment is resolved on the page, not in data coordinates, so
+        # with y inverted an anchor above the island needs va="bottom" to sit
+        # above it: "top" would hang the digit back down onto the lattice.
+        if cy < mid:                 # upper on the page once y is inverted
+            ty, va = min(q[1] for q in pts) - 0.18, "bottom"
+        else:
+            ty, va = max(q[1] for q in pts) + 0.18, "top"
+        ax.text(cx, ty, str(k), ha="center", va=va, fontsize=FS["tick"],
+                color=colours.get(k) or P.INK, clip_on=False)
+
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y1 + pad, y0 - pad)          # inverted: see the docstring
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    return ax
 
 
 def slot_positions(meta, gap=GAP):

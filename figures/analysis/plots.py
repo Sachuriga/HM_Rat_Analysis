@@ -10,7 +10,7 @@ detour the same distance from optimal wherever on the maze it starts.
 
 import numpy as np
 
-from hm_rat_analysis import islands
+from hm_rat_analysis import islands, maze
 
 from analysis import data, style
 
@@ -615,7 +615,7 @@ def island_spatial_info(trials_unused=None, name="island_spatial_info", si=None,
         _pass_rates(_blocks(si), name)
         si = _significant(si)
     si, slots, meta, pos, goals, goal_animals = _si_axis(si)
-    fig, ax = style.new_figure(height_mm=80.0, bottom_mm=26.0)
+    fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
 
     label = {0: "whole maze", **ISLAND_WHERE}
     _si_lines(ax, si, slots, pos, _repeat_runs(meta),
@@ -625,6 +625,9 @@ def island_spatial_info(trials_unused=None, name="island_spatial_info", si=None,
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     ax.set_ylim(bottom=0)
     style.legend(ax, loc="upper left", ncol=2)
+    style.maze_inset(ax.figure, ISLAND_COLOURS,
+                     bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
+                     bridge_dashes=ISLAND_DASH[maze.BRIDGE])
     _si_exposure(si, name, "spatial_info")
     print("    RAW bits/spike, no spike floor: Skaggs is biased upward at low "
           "counts, so the cells with the fewest spikes sit highest here, and "
@@ -659,7 +662,7 @@ def island_spatial_info_matched(trials_unused=None,
         _pass_rates(_blocks(si), name)
         si = _significant(si)
     si, slots, meta, pos, goals, goal_animals = _si_axis(si)
-    fig, ax = style.new_figure(height_mm=80.0, bottom_mm=26.0)
+    fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
 
     label = {0: f"whole maze ({ISLAND_MATCH[0]} spikes)",
              **{k: f"{v} ({ISLAND_MATCH[k]})" for k, v in ISLAND_WHERE.items()}}
@@ -670,6 +673,9 @@ def island_spatial_info_matched(trials_unused=None,
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     ax.set_ylim(bottom=0)
     style.legend(ax, loc="upper left", ncol=2)
+    style.maze_inset(ax.figure, ISLAND_COLOURS,
+                     bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
+                     bridge_dashes=ISLAND_DASH[maze.BRIDGE])
     print(f"  {name}: good pyramidal only, no spike floor, positions gated at "
           f"{islands.SPEED_THRESH:.2f} m/s; each region thinned to its own count.")
     for k in (0,) + ISLAND_ORDER:
@@ -702,7 +708,8 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
     si = _blocks(si)
     goals = sorted(si["repeat"].unique())
     width = 0.80 / max(1, len(goals))
-    fig, ax = style.new_figure(width_mm=180.0, height_mm=82.0, bottom_mm=24.0)
+    fig, ax = style.new_figure(width_mm=180.0, height_mm=102.0, bottom_mm=24.0,
+                               top_mm=24.0)
     shades = [style.P.BLUE, style.P.GREEN_DARK, style.P.AMBER_INK, style.P.RED,
               style.P.INK]
 
@@ -739,6 +746,9 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     ax.set_ylim(bottom=0)
     style.legend(ax, loc="upper right", ncol=2)
+    style.maze_inset(ax.figure, ISLAND_COLOURS,
+                     bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
+                     bridge_dashes=ISLAND_DASH[maze.BRIDGE])
     print(f"  {name}: bars are medians of the count-matched estimate over "
           f"cell-blocks, whiskers the IQR, numbers inside the bars the "
           f"cell-block count. Islands and bridges share a match count; the "
@@ -773,7 +783,7 @@ def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None)
     """
     si = data.island_si() if si is None else si
     si, slots, meta, pos, goals, goal_animals = _si_axis(si)
-    fig, ax = style.new_figure(height_mm=80.0, bottom_mm=26.0)
+    fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
     runs = _repeat_runs(meta)
     for isl in (0,) + ISLAND_ORDER:
         colour = style.P.MUTED if isl == 0 else ISLAND_COLOURS[isl]
@@ -801,6 +811,9 @@ def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None)
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     ax.set_ylim(0, 100)
     style.legend(ax, loc="upper left", ncol=2)
+    style.maze_inset(ax.figure, ISLAND_COLOURS,
+                     bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
+                     bridge_dashes=ISLAND_DASH[maze.BRIDGE])
     _pass_rates(si, name)
     return style.save(fig, name)
 
