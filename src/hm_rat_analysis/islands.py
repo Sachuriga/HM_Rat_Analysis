@@ -84,6 +84,16 @@ GOAL_SWITCH_TRIAL_TYPE = 5
 SI_MATCH_LEVELS = (40, 100, 200, 400)
 SI_MATCH_REPEATS = 8
 
+#: Circular shuffles behind each cell's own null distribution. 500 puts the 95th
+#: percentile at the 25th largest of 500, which is stable enough to threshold on;
+#: it costs about 0.35 s per cell-block and all six regions share the draws.
+SHUFFLES = 500
+
+#: Smallest circular shift, in seconds. Shorter shifts leave the spike train
+#: still aligned to the trajectory it came from, so the null would inherit the
+#: cell's real field and the test would be against nothing.
+MIN_SHIFT_S = 20.0
+
 
 def _phase_segments(trials):
     """``[(phase, trials)]``: the whole session, plus each side of a goal switch.
@@ -120,14 +130,25 @@ def _goal_node(trials):
 def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
                       min_occ_s=PF.DEFAULT_MIN_OCC_S, min_spikes=MIN_SPIKES,
                       radius_m=maze.ISLAND_BIN_RADIUS_M,
-                      match_levels=SI_MATCH_LEVELS, seed=0):
+                      match_levels=SI_MATCH_LEVELS, shuffles=SHUFFLES,
+                      min_shift_s=MIN_SHIFT_S, seed=0):
     """One row per (unit, segment, island) for one session.
 
     Columns: ``animal``, ``date``, ``phase`` ("" for the whole session, "a"/"b"
     for the two sides of a goal switch), ``goal_node``, ``unit_id``, ``island``
     (1-4 for the islands, ``maze.BRIDGE`` for the corridors pooled, 0 for the
     whole maze), ``spatial_info``, ``si_m40`` … ``si_m400`` (the same estimate
-    thinned to that many spikes), ``n_spikes``, ``occ_s``, ``n_valid_bins``.
+    thinned to that many spikes), ``n_spikes``, ``occ_s``, ``n_valid_bins``, and
+    the cell's own shuffle null: ``si_null_p95``, ``si_null_mean``, ``si_null_p``
+    and ``sig95``.
+
+    ``sig95`` is the test to use. The null is built by circularly shifting THIS
+    cell's spike train along the trajectory, so the spike count, the occupancy,
+    the bin count and the cell's own burst structure are all held fixed and the
+    only thing that differs from the observed value is whether the spikes are
+    where the animal was when it fired them. A cell above its own 95th
+    percentile has beaten the low-count bias as well, which no amount of
+    count-matching across conditions can establish.
 
     `n_spikes` and `occ_s` are the exposure BEHIND each value and are not
     decoration: an island the animal barely visited scores high for that reason
@@ -194,12 +215,15 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
             masks = {0: visited}
             for k in maze.REGIONS:
                 masks[k] = visited & (isl == k)
+            # Priors once per segment, not once per shuffle: the shuffle reads
+            # each rate map only inside the masks.
+            priors = PF.region_priors(occ["occ_raw"], masks)
             goal = _goal_node(seg)
 
             for idx in udf.index[keep]:
                 st = np.asarray(udf.loc[idx, "spike_times"], dtype=float)
                 st = st[SS._in_windows(st, wins)]
-                spk_s, sx, sy = PF.spike_parts(occ, st)
+                spk_s, sx, sy, sidx = PF.spike_parts(occ, st, return_index=True)
                 # No spike floor by default; a cell with nothing left after the
                 # speed gate still has no rate map, so that one case is out.
                 if sx.size == 0 or sx.size < int(min_spikes):
@@ -211,6 +235,10 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
                 # to an island the spike did not happen on.
                 raw_spk, _, _ = np.histogram2d(sx, sy, **occ["hist_kw"])
                 raw_spk = raw_spk.T
+                null = (PF.shuffled_spatial_info(
+                    occ, sidx, priors, n_shuffles=shuffles,
+                    min_shift_s=min_shift_s, seed=seed) if shuffles
+                    else {k: np.array([]) for k in masks})
                 for k, m in masks.items():
                     si, occ_s, nb = PF.spatial_info_in(lam, occ["occ_raw"], m)
                     row = {"animal": animal, "date": date, "phase": phase,
@@ -220,6 +248,21 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
                            "island": k, "spatial_info": si,
                            "n_spikes": int(raw_spk[m].sum()),
                            "occ_s": float(occ_s), "n_valid_bins": nb}
+                    v = null[k][~np.isnan(null[k])] if k in null else np.array([])
+                    if v.size and np.isfinite(si):
+                        p95 = float(np.percentile(v, 95))
+                        # (hits + 1) / (n + 1): under the null the observed value
+                        # is itself one draw, so a p of exactly 0 is not a result
+                        # this test can produce.
+                        row["si_null_p95"] = p95
+                        row["si_null_mean"] = float(v.mean())
+                        row["si_null_p"] = float((np.sum(v >= si) + 1) / (v.size + 1))
+                        row["sig95"] = bool(si > p95)
+                        row["n_null"] = int(v.size)
+                    else:
+                        row.update({"si_null_p95": np.nan, "si_null_mean": np.nan,
+                                    "si_null_p": np.nan, "sig95": False,
+                                    "n_null": 0})
                     for n in match_levels:
                         row[f"si_m{int(n)}"] = PF.spatial_info_in_matched(
                             occ, sx, sy, m, visited, n,

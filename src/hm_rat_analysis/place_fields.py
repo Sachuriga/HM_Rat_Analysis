@@ -201,9 +201,15 @@ def occupancy_parts(x, y, t, extent, bins, dt, sigma, t0=None, t1=None,
             "hist_kw": {"bins": [nx, ny], "range": rng}}
 
 
-def spike_parts(occ, spike_times):
+def spike_parts(occ, spike_times, return_index=False):
     """One cell's smoothed spike map over a window, given that window's
-    :func:`occupancy_parts`. Returns (smoothed spike map, gated spike x, y)."""
+    :func:`occupancy_parts`. Returns (smoothed spike map, gated spike x, y).
+
+    With `return_index`, a fourth element: for each SURVIVING spike, the index of
+    its nearest position sample in ``occ["x"]``. That is what a circular shuffle
+    needs — it shifts a spike along the trajectory the animal actually ran, and a
+    spike position recovered by interpolation cannot be shifted.
+    """
     x, y, t, move = occ["x"], occ["y"], occ["t"], occ["move"]
     sigma, max_gap_s = occ["sigma"], occ["max_gap_s"]
     spike_times = np.asarray(spike_times, float)
@@ -228,12 +234,16 @@ def spike_parts(occ, spike_times):
         ok = (np.isfinite(sx) & np.isfinite(sy)
               & ((t[j] - t[j - 1]) <= max_gap_s) & move[near])
         sx, sy = sx[ok], sy[ok]
+        idx = near[ok]
         spk, _, _ = np.histogram2d(sx, sy, **occ["hist_kw"])
         spk = spk.T
     else:
         sx = sy = np.array([])
+        idx = np.array([], dtype=int)
         spk = np.zeros_like(occ["occ_raw"])
     spk_s = gaussian_filter(spk, sigma) if (sigma and sigma > 0) else spk
+    if return_index:
+        return spk_s, sx, sy, idx
     return spk_s, sx, sy
 
 
@@ -743,6 +753,87 @@ def spatial_info_in_matched(occ, sx, sy, mask, visited, n_match, repeats=8, seed
         if lam_mean > 0:
             vals.append(_skaggs(lam, p, lam_mean))
     return float(np.nanmean(vals)) if vals else np.nan
+
+
+def region_priors(occ_raw, masks):
+    """``{region: (flat bin indices, prior over them)}`` for :func:`_skaggs`.
+
+    The shuffle computes a few hundred rate maps per cell and only ever reads
+    them inside the region masks, so the prior and the bins it is defined on are
+    built ONCE here instead of once per shuffle. ``spatial_info_in`` is the same
+    arithmetic written over the full grid.
+    """
+    out = {}
+    for k, m in masks.items():
+        idx = np.flatnonzero(m.ravel())
+        w = occ_raw.ravel()[idx]
+        tot = float(w.sum())
+        out[k] = (idx, w / tot) if tot > 0 else (idx, None)
+    return out
+
+
+def shuffled_spatial_info(occ, sample_idx, priors, n_shuffles=200,
+                          min_shift_s=20.0, seed=0):
+    """Null distribution of regional Skaggs SI from circular shifts of the spikes.
+
+    Each shuffle slides the whole spike train along the trajectory the animal
+    actually ran, by a random offset of at least `min_shift_s`, with wraparound.
+    The spike COUNT is therefore identical in every shuffle and in the observed
+    value, which is the point: Skaggs bits/spike is biased upward at low counts,
+    and a null built at the same count carries exactly the same bias. A cell that
+    beats its own shuffle has beaten the bias too, which no amount of
+    count-matching between conditions can establish.
+
+    The shift is applied over the MOVING samples only, the same support the
+    occupancy is built from, so a shifted spike lands where the animal was and at
+    a speed the gate would have kept.
+
+    Shifting the spikes rather than the positions keeps each cell's own
+    inter-spike structure: a burst stays a burst, so the null is not a Poisson
+    cell but this cell, fired somewhere else on the path.
+
+    Returns ``{region: array of n_shuffles values}``.
+    """
+    x, y, move = occ["x"], occ["y"], occ["move"]
+    occ_s, sigma = occ["occ_s"], occ["sigma"]
+    move_idx = np.flatnonzero(move)
+    n = move_idx.size
+    out = {k: np.full(int(n_shuffles), np.nan) for k in priors}
+    if n < 10 or np.asarray(sample_idx).size == 0:
+        return out
+    xm, ym = x[move_idx], y[move_idx]
+    # Position of each spike WITHIN the moving samples. The spikes that survived
+    # spike_parts were all gated on move[near], so every one of them is in
+    # move_idx and this lookup is exact rather than nearest.
+    pos = np.searchsorted(move_idx, np.asarray(sample_idx, dtype=int))
+    lo = int(max(1, round(float(min_shift_s) / float(occ["dt"]))))
+    if n <= 2 * lo:                 # too short to shift meaningfully
+        lo = max(1, n // 10)
+    gen = np.random.default_rng(seed)
+    for i in range(int(n_shuffles)):
+        s = int(gen.integers(lo, max(lo + 1, n - lo)))
+        j = (pos + s) % n
+        spk, _, _ = np.histogram2d(xm[j], ym[j], **occ["hist_kw"])
+        spk = spk.T
+        if sigma and sigma > 0:
+            spk = gaussian_filter(spk, sigma)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lam = np.where(occ_s > 0, spk / occ_s, 0.0)
+        flat = lam.ravel()
+        for k, (idx, p) in priors.items():
+            if p is None or idx.size == 0:
+                continue
+            lam_r = flat[idx]
+            lam_mean = float((p * lam_r).sum())
+            if lam_mean <= 0:
+                continue
+            ratio = lam_r / lam_mean
+            with np.errstate(divide="ignore", invalid="ignore"):
+                terms = np.where(lam_r > 0,
+                                 p * ratio * np.log2(np.where(ratio > 0, ratio, 1.0)),
+                                 0.0)
+            out[k][i] = float(np.nansum(terms))
+    return out
 
 
 def place_field_metrics(x, y, t, spike_times, extent, bins, dt, sigma, speed_thresh,
