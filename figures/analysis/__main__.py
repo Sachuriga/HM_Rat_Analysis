@@ -1,6 +1,6 @@
 """Draw the analysis figures, one file per plot, into ``data.OUT_DIR``.
 
-    python -m analysis                      # every figure, per animal and combined
+    python -m analysis                      # the useful set, per animal and combined
     python -m analysis detour_by_session    # just this one
     python -m analysis --rebuild            # re-walk the sessions first
     HM_FIG_DIR=~/Desktop/figs python -m analysis    # somewhere else
@@ -15,14 +15,15 @@ from analysis import data, plots
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("names", nargs="*", default=None,
-                    help=f"figures to draw (default: all). Known: "
-                         f"{', '.join(sorted(plots.REGISTRY))}")
+                    help=f"figures to draw (default: the useful set, "
+                         f"{', '.join(plots.DEFAULT_FIGURES)}). Also drawable by "
+                         f"name: {', '.join(sorted(set(plots.REGISTRY) - set(plots.DEFAULT_FIGURES)))}")
     ap.add_argument("--rebuild", action="store_true",
                     help="re-walk the session folders instead of using the CSV cache")
     ap.add_argument("--root", default=None, help="session root (default $HM_TASK_ROOT)")
     a = ap.parse_args(argv)
 
-    names = a.names or sorted(plots.REGISTRY)
+    names = a.names or list(plots.DEFAULT_FIGURES)
     unknown = [n for n in names if n not in plots.REGISTRY]
     if unknown:
         ap.error(f"unknown figure(s): {', '.join(unknown)}")

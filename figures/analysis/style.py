@@ -39,11 +39,14 @@ def new_figure(width_mm=180.0, height_mm=70.0, left_mm=18.0, right_mm=3.0,
     its ticks and the bottom one carries rotated slot labels, and neither shrinks
     with the page.
     """
-    fig = plt.figure(figsize=(width_mm * MM, height_mm * MM), facecolor=P.SURFACE)
+    # No background: the figures are dropped onto slides and posters whose own
+    # background is not this cream, and an opaque panel there reads as a pasted
+    # rectangle. Everything that needs to be opaque paints itself.
+    fig = plt.figure(figsize=(width_mm * MM, height_mm * MM), facecolor="none")
     ax = fig.add_axes([left_mm / width_mm, bottom_mm / height_mm,
                        1 - (left_mm + right_mm) / width_mm,
                        1 - (top_mm + bottom_mm) / height_mm])
-    ax.set_facecolor(P.SURFACE)
+    ax.set_facecolor("none")
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     for s in ("left", "bottom"):
@@ -123,13 +126,22 @@ def legend(ax, **kw):
 
 
 def save(fig, name, out_dir=None, dpi=600):
-    """Write ONE plot to its own PDF and PNG, and say where it went."""
+    """Write ONE plot to its own PDF and PNG, and say where it went.
+
+    Both are written with a TRANSPARENT background, so the page or slide behind
+    them shows through. Note what that does and does not cover: the figure and
+    axes panels are clear, but anything drawn in an explicit light colour is
+    still drawn, and on a dark background it stays light. That is the white ring
+    around each marker, which is there to keep two animals' points apart where
+    they coincide, and the white counts inside the bars, which sit on the bars
+    rather than on the background.
+    """
     out = data.OUT_DIR if out_dir is None else out_dir
     out.mkdir(parents=True, exist_ok=True)
     written = []
     for suffix, extra in ((".pdf", {}), (".png", dict(dpi=dpi))):
         p = (out / name).with_suffix(suffix)
-        fig.savefig(p, facecolor=P.SURFACE, **extra)
+        fig.savefig(p, transparent=True, **extra)
         written.append(p)
     plt.close(fig)
     for p in written:

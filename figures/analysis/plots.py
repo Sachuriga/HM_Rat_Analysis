@@ -135,7 +135,7 @@ def _draw(kept, slots, meta, name, ylabel=DETOUR_LABEL, missing=None, ref=None,
         old = np.array([s.endswith("a") for s in slots])
         ax.plot(pos[~old], m[~old], "o", ms=4.4, color=colour, mec="white",
                 mew=_lw(1.3), zorder=4)
-        ax.plot(pos[old], m[old], "o", ms=4.4, mfc=style.P.SURFACE, mec=colour,
+        ax.plot(pos[old], m[old], "o", ms=4.4, mfc="none", mec=colour,
                 mew=_lw(1.4), zorder=4)
         if substituted is not None:
             sub = np.asarray(substituted.get(animal, []), bool)
@@ -159,7 +159,7 @@ def _draw(kept, slots, meta, name, ylabel=DETOUR_LABEL, missing=None, ref=None,
         ax.plot([], [], "x", ms=4.6, mew=_lw(1.5), color=style.P.MUTED,
                 ls="none", label="goal not reached")
     style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
-    ax.plot([], [], "o", ms=4.4, mfc=style.P.SURFACE, mec=style.P.MUTED,
+    ax.plot([], [], "o", ms=4.4, mfc="none", mec=style.P.MUTED,
             mew=_lw(1.4), ls="none", label="to the previous goal")
     ax.set_ylabel(ylabel, fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     ax.set_ylim(bottom=min(-0.02, ax.get_ylim()[0]))
@@ -306,13 +306,13 @@ def _draw_blocks(comp, trials, slots, meta, name, ylabel, column, err=None,
         old = np.array([s.endswith("a") for s in slots])
         ax.plot(pos[~old], y[~old], "o", ms=4.4, color=colour, mec="white",
                 mew=_lw(1.3), zorder=4)
-        ax.plot(pos[old], y[old], "o", ms=4.4, mfc=style.P.SURFACE, mec=colour,
+        ax.plot(pos[old], y[old], "o", ms=4.4, mfc="none", mec=colour,
                 mew=_lw(1.4), zorder=4)
     if ref_line is not None:
         ax.axhline(ref_line, color=style.P.MUTED, lw=_lw(0.8), ls=(0, (4, 3)),
                    zorder=1)
     style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
-    ax.plot([], [], "o", ms=4.4, mfc=style.P.SURFACE, mec=style.P.MUTED,
+    ax.plot([], [], "o", ms=4.4, mfc="none", mec=style.P.MUTED,
             mew=_lw(1.4), ls="none", label="to the previous goal")
     ax.set_ylabel(ylabel, fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     if integer_y:
@@ -862,6 +862,31 @@ def draw(name, trials, si=None, animals=None, combined=True):
         out += list(fn(trials[trials["animal"] == a], name=f"{name}_{a}", **kw))
     return out
 
+
+#: What ``python -m analysis`` draws when no names are given. The rest of
+#: :data:`REGISTRY` is still drawable by name, but is not useful output any more
+#: and is left out so the folder stays readable:
+#:
+#: * ``island_spatial_info`` and ``island_spatial_info_sig`` plot RAW bits/spike.
+#:   With no spike floor the cells with the fewest spikes sit highest, and spike
+#:   counts fall across the schedule, so neither the level nor the trend can be
+#:   read. The significance filter fixes which cells are in the median, not what
+#:   the median is.
+#: * ``island_spatial_info_matched`` and ``island_spatial_info_bars`` are over all
+#:   cells. Their cross-session rise is mostly the MIXTURE moving: restricted to
+#:   cells that beat their own shuffle, the per-island trend falls from +0.52 to
+#:   +0.83 down to -0.08 to +0.35. What actually changes is the fraction of cells
+#:   coding position, which ``island_sig_fraction`` plots directly.
+DEFAULT_FIGURES = (
+    "detour_by_session",
+    "detour_first_trial",
+    "detour_trials_2_5",
+    "success_rate",
+    "trials_to_first_success",
+    "island_sig_fraction",
+    "island_spatial_info_matched_sig",
+    "island_spatial_info_bars_sig",
+)
 
 #: name -> function. ``python -m analysis`` draws these.
 REGISTRY = {
