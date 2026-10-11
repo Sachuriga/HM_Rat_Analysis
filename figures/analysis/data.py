@@ -24,6 +24,28 @@ ROOT = Path(os.environ.get(
     "HM_TASK_ROOT", "/Volumes/genzel/Rat/HM/Rat_HM_Neuron/task"))
 OUT_DIR = Path(os.environ.get("HM_FIG_DIR", ROOT / "figures"))
 
+
+def out_dir():
+    """:data:`OUT_DIR`, created if needed, after checking the share is mounted.
+
+    Never a bare ``mkdir(parents=True)`` on this path. ROOT is on a network
+    share, and when the share drops out mid-run the mount point becomes an
+    ordinary empty directory: creating parents then builds a hollow copy of the
+    tree on the local disk and the run writes its results into it, reporting
+    success. The real data is untouched but invisible, and the next mount hides
+    the fake tree behind the real one, so the figures and the CSV silently come
+    from two different places. This happened on 9 October 2026; it failed only
+    because /Volumes refused the write.
+
+    So: the share must already be there. If it is not, say so and stop.
+    """
+    if not ROOT.is_dir():
+        raise FileNotFoundError(
+            f"{ROOT} is not reachable. The share is not mounted; remount it "
+            f"and run again. Nothing was written.")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    return OUT_DIR
+
 #: repeat 0 predates any goal. Dropped from the figures: with no goal there is no
 #: optimal route, so a path efficiency computed there measures nothing.
 HABITUATION_REPEAT = 0
@@ -113,8 +135,7 @@ def trials(root=None, cache=True, rebuild=False):
     who asks where a number came from.
     """
     root = ROOT if root is None else Path(root)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = OUT_DIR / "trials_detour.csv"
+    cache_file = out_dir() / "trials_detour.csv"
     if cache and not rebuild and cache_file.exists():
         return pd.read_csv(cache_file)
     out = build_trials(root)
@@ -123,8 +144,30 @@ def trials(root=None, cache=True, rebuild=False):
     return out
 
 
-def build_island_si(root=None, progress=True):
+#: Where each session's island metrics are parked as they are computed. On the
+#: LOCAL disk, not the share: the point of the checkpoint is to survive the
+#: share going away, which it cannot do if it lives there.
+CHECKPOINT_DIR = Path(os.environ.get(
+    "HM_ISLAND_CHECKPOINTS",
+    Path.home() / ".cache" / "hm_rat_analysis" / "island_si"))
+
+
+def _checkpoint(animal, date):
+    return CHECKPOINT_DIR / f"{animal}_{date}.parquet"
+
+
+def build_island_si(root=None, progress=True, resume=True):
     """Walk every session and return per-unit, per-island spatial information.
+
+    Each session is written to :data:`CHECKPOINT_DIR` as soon as it is computed,
+    and with `resume` a session already parked there is loaded instead of
+    recomputed. The walk takes well over an hour with the shuffles on, and the
+    share it reads from has dropped out mid-run before: without this, a drop at
+    session 15 of 40 throws away everything, which is what happened on 9 October
+    2026. The checkpoints live on the local disk for the same reason.
+
+    Delete the directory, or pass ``resume=False``, to force a clean rebuild
+    after changing anything about how a session is scored.
 
     One row per (unit, segment, island) plus ``island = 0`` for the whole maze, so
     the four values can always be read against the number they decompose.
@@ -135,6 +178,7 @@ def build_island_si(root=None, progress=True):
     figures use. A figure picks one by filtering `phase`.
     """
     root = ROOT if root is None else Path(root)
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     frames = []
     sess = list(_sessions(root))
     for i, (animal, date, d) in enumerate(sess, 1):
@@ -142,6 +186,13 @@ def build_island_si(root=None, progress=True):
                     if not p.name.startswith("._")
                     and not p.name.endswith(".tmp.nwb")), None)
         if nwb is None:
+            continue
+        ck = _checkpoint(animal, date)
+        if resume and ck.exists():
+            if progress:
+                print(f"  [{i}/{len(sess)}] {animal} {date}  (checkpoint)",
+                      flush=True)
+            frames.append(pd.read_parquet(ck))
             continue
         if progress:
             print(f"  [{i}/{len(sess)}] {animal} {date}", flush=True)
@@ -151,6 +202,9 @@ def build_island_si(root=None, progress=True):
             print(f"      failed: {e}", flush=True)
             continue
         if not f.empty:
+            # Written before the next session starts, so an interruption costs
+            # one session rather than the whole walk.
+            f.to_parquet(ck, index=False)
             frames.append(f)
     if not frames:
         raise FileNotFoundError(f"no island metrics built under {root}")
@@ -173,8 +227,7 @@ def build_island_si(root=None, progress=True):
 def island_si(root=None, cache=True, rebuild=False):
     """Per-unit, per-island spatial information, from cache when one is there."""
     root = ROOT if root is None else Path(root)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    f = OUT_DIR / "island_spatial_info.csv"
+    f = out_dir() / "island_spatial_info.csv"
     if cache and not rebuild and f.exists():
         return pd.read_csv(f)
     out = build_island_si(root)

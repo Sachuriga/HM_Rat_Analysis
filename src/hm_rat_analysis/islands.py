@@ -84,6 +84,16 @@ GOAL_SWITCH_TRIAL_TYPE = 5
 SI_MATCH_LEVELS = (40, 100, 200, 400)
 SI_MATCH_REPEATS = 8
 
+#: The level each region's figures actually use, and the level its count-matched
+#: SHUFFLE is run at. Defined here rather than in the figure code because it is a
+#: property of the data: it is chosen for coverage, and 40 is the only level the
+#: bridges can reach at all. ``plots.ISLAND_MATCH`` is an alias.
+SI_MATCH_BY_REGION = {0: 200, 1: 40, 2: 40, 3: 40, 4: 40, maze.BRIDGE: 40}
+
+#: Shuffles behind the COUNT-MATCHED test. Same number as the unmatched one, so
+#: the two pass rates are resolved to the same precision and can be compared.
+MATCH_SHUFFLES = 500
+
 #: Circular shuffles behind each cell's own null distribution. 500 puts the 95th
 #: percentile at the 25th largest of 500, which is stable enough to threshold on;
 #: it costs about 0.35 s per cell-block and all six regions share the draws.
@@ -131,7 +141,8 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
                       min_occ_s=PF.DEFAULT_MIN_OCC_S, min_spikes=MIN_SPIKES,
                       radius_m=maze.ISLAND_BIN_RADIUS_M,
                       match_levels=SI_MATCH_LEVELS, shuffles=SHUFFLES,
-                      min_shift_s=MIN_SHIFT_S, seed=0):
+                      match_shuffles=MATCH_SHUFFLES,
+                      match_by_region=None, min_shift_s=MIN_SHIFT_S, seed=0):
     """One row per (unit, segment, island) for one session.
 
     Columns: ``animal``, ``date``, ``phase`` ("" for the whole session, "a"/"b"
@@ -142,7 +153,16 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
     the cell's own shuffle null: ``si_null_p95``, ``si_null_mean``, ``si_null_p``
     and ``sig95``.
 
-    ``sig95`` is the test to use. The null is built by circularly shifting THIS
+    ``sig95_matched`` is the same test with the observed value AND every shuffle
+    thinned to :data:`SI_MATCH_BY_REGION` spikes, with ``si_matched``,
+    ``si_match_n``, ``si_match_null_p95`` and ``si_match_null_p`` beside it. Use
+    it whenever PASS RATES are compared between regions: ``sig95`` holds the
+    count fixed per cell, which is fair for that cell but leaves a bridge cell
+    (median 20 spikes) with less power than an island cell (106 to 149), so the
+    two regions' pass rates are not on the same footing. Matching costs the
+    cell-blocks that cannot reach the level, which is 60% of the bridges.
+
+    ``sig95`` is the test to use for one region. The null is built by circularly shifting THIS
     cell's spike train along the trajectory, so the spike count, the occupancy,
     the bin count and the cell's own burst structure are all held fixed and the
     only thing that differs from the observed value is whether the spikes are
@@ -188,6 +208,8 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
         bx_cm, _ = PF.bin_size_cm(ext, bins)
         sigma = float(smooth_cm) / bx_cm
         isl = maze.bin_islands(ext, bins, radius_m=radius_m)
+        match_r = (SI_MATCH_BY_REGION if match_by_region is None
+                   else dict(match_by_region))
 
         # Cell type on the WHOLE session, so a cell is classified the same way in
         # both halves of a split day: classifying on ten trials would let the
@@ -218,6 +240,11 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
             # Priors once per segment, not once per shuffle: the shuffle reads
             # each rate map only inside the masks.
             priors = PF.region_priors(occ["occ_raw"], masks)
+            # Cropped windows for the matched shuffle: it rebuilds a map per
+            # region per draw, and a full-grid filter spends 86% of its work on
+            # bins an island never reads.
+            wins_r = (PF.region_windows(occ, masks, priors)
+                      if match_shuffles else {})
             goal = _goal_node(seg)
 
             for idx in udf.index[keep]:
@@ -238,6 +265,11 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
                 null = (PF.shuffled_spatial_info(
                     occ, sidx, priors, n_shuffles=shuffles,
                     min_shift_s=min_shift_s, seed=seed) if shuffles
+                    else {k: np.array([]) for k in masks})
+                null_m = (PF.shuffled_spatial_info_matched(
+                    occ, sidx, masks, wins_r, match_r,
+                    n_shuffles=match_shuffles, min_shift_s=min_shift_s,
+                    seed=seed) if match_shuffles
                     else {k: np.array([]) for k in masks})
                 for k, m in masks.items():
                     si, occ_s, nb = PF.spatial_info_in(lam, occ["occ_raw"], m)
@@ -267,6 +299,25 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
                         row[f"si_m{int(n)}"] = PF.spatial_info_in_matched(
                             occ, sx, sy, m, visited, n,
                             repeats=SI_MATCH_REPEATS, seed=seed)
+                    # The same test with both sides thinned to a common count.
+                    want = int(match_r.get(k, 0))
+                    obs_m = row.get(f"si_m{want}", np.nan) if want else np.nan
+                    vm = null_m[k][~np.isnan(null_m[k])] if k in null_m \
+                        else np.array([])
+                    row["si_matched"] = obs_m
+                    row["si_match_n"] = want
+                    if vm.size and np.isfinite(obs_m):
+                        p95m = float(np.percentile(vm, 95))
+                        row["si_match_null_p95"] = p95m
+                        row["si_match_null_p"] = float(
+                            (np.sum(vm >= obs_m) + 1) / (vm.size + 1))
+                        row["sig95_matched"] = bool(obs_m > p95m)
+                        row["n_null_matched"] = int(vm.size)
+                    else:
+                        row.update({"si_match_null_p95": np.nan,
+                                    "si_match_null_p": np.nan,
+                                    "sig95_matched": False,
+                                    "n_null_matched": 0})
                     rows.append(row)
         return pd.DataFrame(rows)
     finally:

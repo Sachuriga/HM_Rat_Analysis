@@ -10,6 +10,8 @@ labels legible, and what gives on a narrow page is the layout, never the type.
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt                                   # noqa: E402
+from pathlib import Path
+
 import numpy as np                                                # noqa: E402
 
 import palette as P                                               # noqa: E402
@@ -226,7 +228,10 @@ def save(fig, name, out_dir=None, dpi=600):
     they coincide, and the white counts inside the bars, which sit on the bars
     rather than on the background.
     """
-    out = data.OUT_DIR if out_dir is None else out_dir
+    # Through data.out_dir(), which refuses to create the tree when the share
+    # is not mounted. A plain mkdir(parents=True) here would write the figures
+    # to a hollow copy of the path on the local disk.
+    out = data.out_dir() if out_dir is None else Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written = []
     for suffix, extra in ((".pdf", {}), (".png", dict(dpi=dpi))):

@@ -8,6 +8,8 @@ Path inefficiency is ``log10(actual hops / optimal hops)``: 0 is an optimal run,
 detour the same distance from optimal wherever on the maze it starts.
 """
 
+import inspect
+
 import numpy as np
 
 from hm_rat_analysis import islands, maze
@@ -482,7 +484,16 @@ def _si_lines(ax, si, slots, pos, runs, columns, dash_regions=None, label=None):
                     mew=_lw(0.9), zorder=5)
 
 
-def _significant(si):
+#: The two significance columns, and what each is for. `sig95` holds each cell's
+#: own spike count, which is the fair test FOR THAT CELL; `sig95_matched` thins
+#: both the value and the null to a count shared across regions, which is the
+#: fair test BETWEEN regions. A pass rate compared across regions has to use the
+#: matched one, because a bridge cell (median 20 spikes) has less power than an
+#: island cell (106 to 149) whatever it is doing.
+SIG_COLUMNS = {False: "sig95", True: "sig95_matched"}
+
+
+def _significant(si, matched=False):
     """Rows whose cell beat its OWN shuffle in THAT region, at 95%.
 
     Per region, not per cell: a cell can carry position on one island and not on
@@ -496,27 +507,68 @@ def _significant(si):
     which is why these figures report the pass RATE: a line whose pass rate is
     near 5% is a line of noise, whatever its median says.
     """
-    if "sig95" not in si.columns:
-        raise KeyError("no sig95 column: rebuild the island table with "
-                       "`python -m analysis island_spatial_info --rebuild`")
-    return si[si["sig95"].astype(bool)].copy()
+    col = SIG_COLUMNS[bool(matched)]
+    if col not in si.columns:
+        raise KeyError(f"no {col} column: rebuild the island table with "
+                       f"`python -m analysis island_spatial_info --rebuild`")
+    return si[si[col].astype(bool)].copy()
 
 
-def _pass_rates(si, name):
+def _pass_rates(si, name, matched=False):
     """Print the fraction of cell-blocks that beat their own shuffle, per region."""
-    n_null = int(si["n_null"].max()) if "n_null" in si.columns else 0
-    print(f"  {name}: cell-blocks above their own 95th percentile "
+    col = SIG_COLUMNS[bool(matched)]
+    pcol = "si_match_null_p" if matched else "si_null_p"
+    ncol = "n_null_matched" if matched else "n_null"
+    n_null = int(si[ncol].max()) if ncol in si.columns else 0
+    kind = ("count-matched" if matched else "each cell at its own count")
+    print(f"  {name}: cell-blocks above their own 95th percentile, {kind} "
           f"({n_null} circular shifts):")
     g = si.groupby("island")
     for k in (0,) + ISLAND_ORDER:
         if k not in g.groups:
             continue
         d = g.get_group(k)
-        ok = d["sig95"].astype(bool)
+        ok = d[col].astype(bool)
+        if matched:
+            # A cell-block below the match level is not a failure, it is absent:
+            # reporting it as one would turn the bridges' 40% into an artefact of
+            # how the denominator was chosen.
+            d = d[d["si_matched"].notna()]
+            ok = d[col].astype(bool)
         where = "whole maze" if k == 0 else ISLAND_WHERE[k]
-        print(f"    {where:24} {int(ok.sum()):5d}/{len(d):5d} = "
-              f"{100 * ok.mean():4.0f}%   median p = {d['si_null_p'].median():.3f}")
+        n = len(d)
+        print(f"    {where:24} {int(ok.sum()):5d}/{n:5d} = "
+              f"{(100 * ok.mean()) if n else float('nan'):4.0f}%   "
+              f"median p = {d[pcol].median():.3f}")
     print("    5% is what no spatial coding at all would give.")
+
+
+def _shared_top(si, columns, headroom=1.06):
+    """A y top that holds BOTH the all-cell and the significant-cell version.
+
+    The two figures are drawn to be read against each other, and an axis that
+    autoscales to its own panel defeats that: the significant cells sit higher,
+    so their panel would get a taller axis and the difference between the two
+    populations would be rescaled away into looking like no difference at all.
+    Computed once over both populations and passed to both.
+
+    The top covers the per-slot upper quartile, which is what the whiskers draw,
+    not the most extreme cell.
+    """
+    si = _blocks(si)
+    pops = [si]
+    if "sig95" in si.columns:
+        pops.append(si[si["sig95"].astype(bool)])
+    top = 0.0
+    for pop in pops:
+        for region, column in columns.items():
+            d = pop[pop["island"] == region]
+            if d.empty or column not in d.columns:
+                continue
+            q3 = d.groupby("slot")[column].quantile(0.75)
+            if q3.notna().any():
+                top = max(top, float(q3.max()))
+    return (top * headroom) if top > 0 else None
 
 
 def _si_axis(si):
@@ -579,7 +631,10 @@ ISLAND_DASH = {5: (3.5, 2.0)}
 #: buys something the earlier version could not offer: all five regions are
 #: matched at the SAME count, so they may be read against each other. Only the
 #: whole-maze line stands apart, at 200.
-ISLAND_MATCH = {0: 200, 1: 40, 2: 40, 3: 40, 4: 40, 5: 40}
+#: Taken from `islands`, not restated: the count-matched SHUFFLE is run at these
+#: levels during the build, so a figure that used different ones would plot a
+#: value its own significance test never saw.
+ISLAND_MATCH = islands.SI_MATCH_BY_REGION
 
 
 def _matched_column(island):
@@ -611,6 +666,10 @@ def island_spatial_info(trials_unused=None, name="island_spatial_info", si=None,
     is one-dimensional.
     """
     si = data.island_si() if si is None else si
+    columns = {k: "spatial_info" for k in (0,) + ISLAND_ORDER}
+    # From the UNFILTERED table, so the all-cell and significant-cell versions
+    # share an axis and can be laid side by side.
+    top = _shared_top(si, columns)
     if sig_only:
         _pass_rates(_blocks(si), name)
         si = _significant(si)
@@ -618,12 +677,11 @@ def island_spatial_info(trials_unused=None, name="island_spatial_info", si=None,
     fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
 
     label = {0: "whole maze", **ISLAND_WHERE}
-    _si_lines(ax, si, slots, pos, _repeat_runs(meta),
-              {k: "spatial_info" for k in (0,) + ISLAND_ORDER}, label=label)
+    _si_lines(ax, si, slots, pos, _repeat_runs(meta), columns, label=label)
     style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
     ax.set_ylabel("spatial information\n(bits/spike, median over cells)",
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(0, top)
     style.legend(ax, loc="upper left", ncol=2)
     style.maze_inset(ax.figure, ISLAND_COLOURS,
                      bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
@@ -658,6 +716,10 @@ def island_spatial_info_matched(trials_unused=None,
     the matching drops, and those cells sit at the top of the raw distribution.
     """
     si = data.island_si() if si is None else si
+    columns = {k: _matched_column(k) for k in (0,) + ISLAND_ORDER}
+    # From the UNFILTERED table, so the all-cell and significant-cell versions
+    # of this figure share an axis and can be laid side by side.
+    top = _shared_top(si, columns)
     if sig_only:
         _pass_rates(_blocks(si), name)
         si = _significant(si)
@@ -666,12 +728,11 @@ def island_spatial_info_matched(trials_unused=None,
 
     label = {0: f"whole maze ({ISLAND_MATCH[0]} spikes)",
              **{k: f"{v} ({ISLAND_MATCH[k]})" for k, v in ISLAND_WHERE.items()}}
-    _si_lines(ax, si, slots, pos, _repeat_runs(meta),
-              {k: _matched_column(k) for k in (0,) + ISLAND_ORDER}, label=label)
+    _si_lines(ax, si, slots, pos, _repeat_runs(meta), columns, label=label)
     style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
     ax.set_ylabel("spatial information\n(bits/spike at matched count)",
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(0, top)
     style.legend(ax, loc="upper left", ncol=2)
     style.maze_inset(ax.figure, ISLAND_COLOURS,
                      bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
@@ -702,6 +763,7 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
     matched higher and stands on its own.
     """
     si = data.island_si() if si is None else si
+    top = _shared_top(si, {k: _matched_column(k) for k in (0,) + ISLAND_ORDER})
     if sig_only:
         _pass_rates(_blocks(si), name)
         si = _significant(si)
@@ -744,7 +806,7 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
     ax.set_xlim(-0.6, len(regions) - 0.4)
     ax.set_ylabel("spatial information\n(bits/spike at matched count)",
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(0, top)
     style.legend(ax, loc="upper right", ncol=2)
     style.maze_inset(ax.figure, ISLAND_COLOURS,
                      bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
@@ -760,7 +822,115 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
     return style.save(fig, name)
 
 
-def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None):
+def whole_maze_spatial_info(trials_unused=None, name="whole_maze_spatial_info",
+                            si=None, matched=True):
+    """Whole-maze spatial information across the sessions, both populations.
+
+    The grey line on the island figures, given a panel of its own. With one
+    region instead of six there is room to put the two populations side by side:
+    solid is every good pyramidal cell, dashed is only the cells that beat their
+    own circular shuffle in the whole maze. Colour is the animal, as on the
+    behavioural figures.
+
+    Every estimate is thinned to 200 spikes (``ISLAND_MATCH[0]``). Without that
+    the line is unreadable as a trend: spike counts fall by a factor of three or
+    four across these sessions as the trials shorten, and Skaggs bits/spike is
+    biased upward at low counts, so a rise would appear whether or not the coding
+    changed. 200 is the level 72% of whole-maze cell-blocks can afford.
+
+    Read this ABOVE the per-island figures rather than against them. The
+    whole-maze value also carries WHICH island a cell fired on, which is
+    information about the maze and not about position inside a block of it, so it
+    is the larger number by construction. What it adds is the summary: whether
+    the hippocampal map of the whole apparatus sharpened over training.
+
+    The lines break between goals, as everywhere in this folder, and the split
+    days appear as their two halves.
+    """
+    si = data.island_si() if si is None else si
+    column = _matched_column(0) if matched else "spatial_info"
+    top = _shared_top(si, {0: column})
+    si = _blocks(si)
+    si = si[si["island"] == 0]
+    slots, meta = data.slot_order(si)
+    pos = style.slot_positions(meta)
+    goals, goal_animals = data.slot_goals(si)
+    runs = _repeat_runs(meta)
+    fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
+
+    for animal, colour in style.ANIMAL_COLOURS.items():
+        d = si[si["animal"] == animal]
+        if d.empty:
+            continue
+        for pop, dashes, lab in (
+                (d, None, "all cells"),
+                (d[d["sig95"].astype(bool)], (3.5, 2.0), "above own shuffle")):
+            med, q1, q3, n = _si_by_slot(pop, slots, 0, column)
+            good = ~np.isnan(med)
+            ax.vlines(pos[good], q1[good], q3[good], color=colour, lw=_lw(0.7),
+                      alpha=0.40, zorder=3)
+            kw = {"dashes": dashes} if dashes else {}
+            for j, run in enumerate(runs):
+                k = dict(kw)
+                if j == 0:
+                    k["label"] = f"{animal}, {lab}"
+                ax.plot(pos[run], med[run], "-", color=colour, lw=_lw(1.5),
+                        zorder=4, **k)
+            ax.plot(pos[good], med[good], "o", ms=3.4, color=colour,
+                    mec="white", mew=_lw(0.9), zorder=5)
+
+    style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
+    ax.set_ylabel("whole-maze spatial information\n"
+                  + (f"(bits/spike at {ISLAND_MATCH[0]} spikes)" if matched
+                     else "(bits/spike, every spike used)"),
+                  fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
+    ax.set_ylim(0, top)
+    style.legend(ax, loc="upper left", ncol=2)
+    # One colour for the whole maze: the subject here is the apparatus entire,
+    # not its four blocks.
+    style.maze_inset(ax.figure, {k: style.P.MUTED for k in maze.ISLANDS},
+                     bridge_colour=style.P.MUTED,
+                     bridge_dashes=ISLAND_DASH[maze.BRIDGE])
+    _whole_maze_report(si, name, column)
+    return style.save(fig, name)
+
+
+def whole_maze_spatial_info_raw(trials=None,
+                                name="whole_maze_spatial_info_raw", si=None):
+    """:func:`whole_maze_spatial_info` with no count matching: every spike used.
+
+    The twin of the matched figure, for seeing what the unthinned statistic does.
+    It runs higher and steeper, and both of those are partly the bias: spike
+    counts fall across these sessions and Skaggs bits/spike rises as counts fall.
+    Read the two together and the difference between them IS the exposure
+    artefact. Quote the matched one.
+    """
+    return whole_maze_spatial_info(trials, name=name, si=si, matched=False)
+
+
+def _whole_maze_report(si, name, column):
+    """Print the trend both ways, and the exposure it rests on."""
+    from scipy.stats import spearmanr
+    slots, _meta = data.slot_order(si)
+    idx = {s: i for i, s in enumerate(slots)}
+    print(f"  {name}: whole maze, {column}; good pyramidal only, no spike "
+          f"floor, positions gated at {islands.SPEED_THRESH:.2f} m/s.")
+    for lab, d in (("all cells", si),
+                   ("above own shuffle", si[si["sig95"].astype(bool)])):
+        g = d.groupby("slot")[column].median().dropna()
+        rho = (spearmanr([idx[s] for s in g.index], g.values).correlation
+               if len(g) >= 5 else float("nan"))
+        print(f"    {lab:20} n={len(d):5d} cell-blocks  median "
+              f"{d[column].median():.2f}  first block {g.iloc[0]:.2f} -> last "
+              f"{g.iloc[-1]:.2f}  rho(session order) {rho:+.2f}")
+    ok = si["sig95"].astype(bool)
+    print(f"    {100 * ok.mean():.0f}% of whole-maze cell-blocks beat their own "
+          f"shuffle; raw (unmatched) median {si['spatial_info'].median():.2f} "
+          f"against {si[column].median():.2f} matched, which is the count bias.")
+
+
+def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None,
+                        matched=False):
     """The FRACTION of cells that beat their own shuffle, per block and region.
 
     This is where the effect in this dataset actually lives. Restricted to the
@@ -780,15 +950,28 @@ def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None)
 
     The dashed line is 5%, which is what a population with no spatial coding
     would give at a one-sided 95% threshold. Nothing here is near it.
+
+    `matched` picks the test. The default holds each cell's own spike count,
+    which is the fair test for that cell, and is what the lines within a region
+    should be read along. It is NOT fair between regions: a bridge cell carries a
+    median of 20 spikes against an island cell's 106 to 149, and less data means
+    less chance of beating a null whatever the cell is doing, so the bridges'
+    line sits low partly for that reason. With `matched` the observed value and
+    every shuffle are thinned to a count the regions share, which puts the five
+    of them on the same footing; the cost is that a cell-block that cannot reach
+    the count leaves the denominator, which removes 60% of the bridges.
     """
     si = data.island_si() if si is None else si
+    column = SIG_COLUMNS[bool(matched)]
     si, slots, meta, pos, goals, goal_animals = _si_axis(si)
+    if matched:
+        si = si[si["si_matched"].notna()]
     fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
     runs = _repeat_runs(meta)
     for isl in (0,) + ISLAND_ORDER:
         colour = style.P.MUTED if isl == 0 else ISLAND_COLOURS[isl]
         d = si[si["island"] == isl]
-        g = d.groupby("slot")["sig95"]
+        g = d.groupby("slot")[column]
         frac = np.array([100 * g.get_group(x).astype(bool).mean()
                          if x in g.groups else np.nan for x in slots], float)
         dash = {"dashes": ISLAND_DASH[isl]} if isl in ISLAND_DASH else {}
@@ -807,15 +990,26 @@ def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None)
     ax.text(pos[0] - 0.6, 5, " chance (5%)", fontsize=style.FS["tick"],
             color=style.P.MUTED, va="bottom", ha="left")
     style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
-    ax.set_ylabel("cells coding position\n(% above their own shuffle, 95%)",
+    ax.set_ylabel("cells coding position\n"
+                  + ("(% above shuffle at matched count, 95%)" if matched
+                     else "(% above their own shuffle, 95%)"),
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     ax.set_ylim(0, 100)
     style.legend(ax, loc="upper left", ncol=2)
     style.maze_inset(ax.figure, ISLAND_COLOURS,
                      bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
                      bridge_dashes=ISLAND_DASH[maze.BRIDGE])
-    _pass_rates(si, name)
+    _pass_rates(si, name, matched=matched)
     return style.save(fig, name)
+
+
+def island_sig_fraction_matched(trials=None,
+                                name="island_sig_fraction_matched", si=None):
+    """:func:`island_sig_fraction` with the shuffle test run at a matched count.
+
+    The version to use when the five regions' lines are compared to each other.
+    """
+    return island_sig_fraction(trials, name=name, si=si, matched=True)
 
 
 def island_spatial_info_sig(trials=None, name="island_spatial_info_sig", si=None):
@@ -841,12 +1035,31 @@ def island_spatial_info_bars_sig(trials=None, name="island_spatial_info_bars_sig
     return island_spatial_info_bars(trials, name=name, si=si, sig_only=True)
 
 
-#: Figures whose data is the island table rather than the trial table. They take
-#: `si` and ignore `trials`, so the dispatcher has to know which is which.
-SI_FIGURES = ("island_spatial_info", "island_spatial_info_matched",
-              "island_spatial_info_bars", "island_spatial_info_sig",
-              "island_spatial_info_matched_sig", "island_spatial_info_bars_sig",
-              "island_sig_fraction")
+def _takes_si(fn):
+    """Whether `fn` reads the island table, i.e. whether it accepts ``si``.
+
+    Asked of the function rather than looked up in a list. The list this
+    replaced had to be edited every time a figure was added, and when
+    `whole_maze_spatial_info` was left off it, the dispatcher silently stopped
+    handing that figure the per-animal subset: both animals' files were drawn
+    from the whole table and came out identical. A signature cannot fall out of
+    step with itself.
+    """
+    return "si" in inspect.signature(fn).parameters
+
+
+# Imported HERE and not at the top of the file on purpose. `schematic` reads
+# ISLAND_COLOURS and _lw from this module, so the two import each other; by this
+# line both exist, and an import at the top would run schematic before they do.
+from analysis import schematic                                      # noqa: E402
+
+#: Figures that are the SAME for every animal, so `draw` writes one file instead
+#: of one per animal. The schematics explain the apparatus and the protocol, both
+#: of which the animals share; only their goal nodes differ, and the maze
+#: schematic carries both animals' goals on the one diagram. The trial schematic
+#: is one FIXED example trial, so a per-animal copy of it would be the same
+#: picture under a name that contradicts it.
+COMBINED_ONLY = ("schematic_maze", "schematic_trial", "schematic_schedule")
 
 
 def draw(name, trials, si=None, animals=None, combined=True):
@@ -862,12 +1075,14 @@ def draw(name, trials, si=None, animals=None, combined=True):
     worth one figure and the behavioural ones read well that way.
     """
     fn = REGISTRY[name]
-    uses_si = name in SI_FIGURES
+    uses_si = _takes_si(fn)
     if uses_si and si is None:
         si = data.island_si()
     out = []
     if combined:
         out += list(fn(trials, name=name, **({"si": si} if uses_si else {})))
+    if name in COMBINED_ONLY:
+        return out
     src = si if uses_si else trials
     for a in (animals if animals is not None
               else sorted(src["animal"].dropna().unique())):
@@ -891,18 +1106,33 @@ def draw(name, trials, si=None, animals=None, combined=True):
 #:   +0.83 down to -0.08 to +0.35. What actually changes is the fraction of cells
 #:   coding position, which ``island_sig_fraction`` plots directly.
 DEFAULT_FIGURES = (
+    "schematic_maze",
+    "schematic_trial",
+    "schematic_schedule",
     "detour_by_session",
     "detour_first_trial",
     "detour_trials_2_5",
     "success_rate",
     "trials_to_first_success",
+    "whole_maze_spatial_info",
+    "whole_maze_spatial_info_raw",
     "island_sig_fraction",
+    "island_sig_fraction_matched",
+    "island_spatial_info",
+    "island_spatial_info_sig",
+    "island_spatial_info_matched",
     "island_spatial_info_matched_sig",
+    "island_spatial_info_bars",
     "island_spatial_info_bars_sig",
 )
 
 #: name -> function. ``python -m analysis`` draws these.
 REGISTRY = {
+    "schematic_maze": schematic.schematic_maze,
+    "whole_maze_spatial_info": whole_maze_spatial_info,
+    "whole_maze_spatial_info_raw": whole_maze_spatial_info_raw,
+    "schematic_trial": schematic.schematic_trial,
+    "schematic_schedule": schematic.schematic_schedule,
     "island_spatial_info": island_spatial_info,
     "island_spatial_info_matched": island_spatial_info_matched,
     "island_spatial_info_bars": island_spatial_info_bars,
@@ -910,6 +1140,7 @@ REGISTRY = {
     "island_spatial_info_matched_sig": island_spatial_info_matched_sig,
     "island_spatial_info_bars_sig": island_spatial_info_bars_sig,
     "island_sig_fraction": island_sig_fraction,
+    "island_sig_fraction_matched": island_sig_fraction_matched,
     "detour_by_session": detour_by_session,
     "detour_first_trial": detour_first_trial,
     "detour_trials_2_5": detour_trials_2_5,

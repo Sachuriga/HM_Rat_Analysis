@@ -836,6 +836,108 @@ def shuffled_spatial_info(occ, sample_idx, priors, n_shuffles=200,
     return out
 
 
+def region_windows(occ, masks, priors, sigma_pad=3.0):
+    """A cropped working window per region, for the count-matched shuffle.
+
+    The matched null rebuilds a rate map a few hundred times per region, and a
+    full-grid ``gaussian_filter`` is 72000 bins of which an island uses a tenth
+    and a bridge far less. Only spikes INSIDE the mask are thinned, and the
+    estimate is only ever read inside the mask, so a window holding the mask plus
+    `sigma_pad` kernel widths carries everything that can contribute: cropping to
+    it is exact, not an approximation.
+
+    Returns ``{region: dict}`` with the window's slices, the in-window occupancy,
+    the flat indices of the mask within the window, and the prior over them.
+    """
+    occ_s, sigma = occ["occ_s"], occ["sigma"]
+    pad = int(np.ceil(sigma_pad * float(sigma))) + 1
+    ny, nx = occ_s.shape
+    out = {}
+    for k, m in masks.items():
+        idx, p = priors.get(k, (np.array([], dtype=int), None))
+        if p is None or idx.size == 0:
+            out[k] = None
+            continue
+        ys, xs = np.nonzero(m)
+        y0, y1 = max(0, ys.min() - pad), min(ny, ys.max() + pad + 1)
+        x0, x1 = max(0, xs.min() - pad), min(nx, xs.max() + pad + 1)
+        win_m = m[y0:y1, x0:x1]
+        out[k] = {"sl": (slice(y0, y1), slice(x0, x1)),
+                  "shape": (y1 - y0, x1 - x0),
+                  "occ_s": occ_s[y0:y1, x0:x1],
+                  "flat": np.flatnonzero(win_m.ravel()),
+                  "p": p, "y0": y0, "x0": x0}
+    return out
+
+
+def shuffled_spatial_info_matched(occ, sample_idx, masks, windows, match,
+                                  n_shuffles=200, min_shift_s=20.0, seed=0):
+    """Null for the COUNT-MATCHED estimate: every draw thinned to `match` spikes.
+
+    :func:`shuffled_spatial_info` holds the spike count fixed at whatever the
+    cell fired, which makes the test fair for THAT cell. It does not make the
+    test equally powerful across regions: a bridge carries a median of 20 spikes
+    against an island's 106 to 149, so a bridge cell has less chance of beating
+    its own null whatever it is doing, and the pass RATES of two regions cannot
+    be compared. Thinning the observed value and every shuffle to one common
+    count fixes that, at the cost of throwing away the cell-blocks that cannot
+    reach it.
+
+    `match` maps region -> spike count. Returns ``{region: array}``.
+    """
+    x, y, move = occ["x"], occ["y"], occ["move"]
+    sigma = occ["sigma"]
+    (xmin, xmax), (ymin, ymax) = occ["hist_kw"]["range"]
+    nbx, nby = occ["hist_kw"]["bins"]
+    move_idx = np.flatnonzero(move)
+    n = move_idx.size
+    out = {k: np.full(int(n_shuffles), np.nan) for k in masks}
+    if n < 10 or np.asarray(sample_idx).size == 0:
+        return out
+    xm, ym = x[move_idx], y[move_idx]
+    pos = np.searchsorted(move_idx, np.asarray(sample_idx, dtype=int))
+    lo = int(max(1, round(float(min_shift_s) / float(occ["dt"]))))
+    if n <= 2 * lo:
+        lo = max(1, n // 10)
+    gen = np.random.default_rng(seed)
+    for i in range(int(n_shuffles)):
+        sh = int(gen.integers(lo, max(lo + 1, n - lo)))
+        j = (pos + sh) % n
+        ix = np.clip(((xm[j] - xmin) / (xmax - xmin) * nbx).astype(int), 0, nbx - 1)
+        iy = np.clip(((ym[j] - ymin) / (ymax - ymin) * nby).astype(int), 0, nby - 1)
+        for k, m in masks.items():
+            w = windows.get(k)
+            want = int(match.get(k, 0))
+            if w is None or want <= 0:
+                continue
+            inside = np.flatnonzero(m[iy, ix])
+            if inside.size < want:
+                continue
+            sel = inside[gen.choice(inside.size, want, replace=False)]
+            wy = iy[sel] - w["y0"]
+            wx = ix[sel] - w["x0"]
+            h, bw = w["shape"]
+            keep = (wy >= 0) & (wy < h) & (wx >= 0) & (wx < bw)
+            spk = np.bincount(wy[keep] * bw + wx[keep], minlength=h * bw)
+            spk = spk.reshape(h, bw).astype(float)
+            if sigma and sigma > 0:
+                spk = gaussian_filter(spk, sigma)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lam = np.where(w["occ_s"] > 0, spk / w["occ_s"], 0.0)
+            lam_r = lam.ravel()[w["flat"]]
+            p = w["p"]
+            lam_mean = float((p * lam_r).sum())
+            if lam_mean <= 0:
+                continue
+            ratio = lam_r / lam_mean
+            with np.errstate(divide="ignore", invalid="ignore"):
+                terms = np.where(lam_r > 0,
+                                 p * ratio * np.log2(np.where(ratio > 0, ratio, 1.0)),
+                                 0.0)
+            out[k][i] = float(np.nansum(terms))
+    return out
+
+
 def place_field_metrics(x, y, t, spike_times, extent, bins, dt, sigma, speed_thresh,
                         goal_xy=None, t0=None, t1=None,
                         field_frac=DEFAULT_FIELD_FRAC, min_peak_hz=DEFAULT_MIN_PEAK_HZ,
