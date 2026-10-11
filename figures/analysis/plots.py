@@ -923,6 +923,132 @@ def _whole_maze_report(si, name, column):
           f"against {si[column].median():.2f} matched, which is the count bias.")
 
 
+#: Regions the dwell-matched table carries. The bridges collect a median of
+#: 46 s and cannot give the 100 s the matching asks for, so they are absent
+#: rather than empty; the whole maze is not scored there at all, because the
+#: question the matching answers is about one region against another.
+DWELL_REGIONS = (4, 3, 2, 1)
+
+
+def island_sig_fraction_dwell(trials_unused=None,
+                              name="island_sig_fraction_dwell_time_spikes",
+                              si=None, matched=True):
+    """Cells that beat their own shuffle, with every island given EQUAL TIME.
+
+    :func:`island_sig_fraction` over the dwell-matched table: each island, in
+    each block, is cut to a random 100 s of the animal's moving frames, and the
+    occupancy, the rate maps and the null are all built from that and nothing
+    else (see :func:`islands.session_island_si_occmatched`).
+
+    Why it matters here more than anywhere: the animal lingers on the island
+    carrying the goal, a median of 239 s against 150 s elsewhere, and the first
+    version of this figure made that look like a coding difference. With the
+    time equalised the goal-island advantage disappears (8 of 8 paired
+    comparisons became 4 of 8), while the rise across sessions survives and
+    sharpens. Both of those are in ``fig_goal_island``; this figure is the
+    per-session view behind them.
+
+    The spike count is matched as well, and both controls are needed. Equal time
+    does not give equal spikes: the animal fires faster on the island carrying
+    the goal, a median of 212 spikes against 158 in the same 100 s. And the
+    shuffle does not make that harmless, because it equalises the bias but not
+    the POWER — a cell with few spikes has a wide null and cannot beat it
+    whatever it is doing. Measured here, the pass rate runs 10%, 35%, 48%, 47%,
+    26% across spike-count quintiles at each cell's own count, so a comparison
+    between regions of unequal count is partly a comparison of statistical
+    power. `matched=False` drops the second control and is kept only for seeing
+    what it costs.
+
+    Cutting to 100 s does NOT silence cells, which was the worry: the window
+    holds fewer low-count cells than the whole block does (none at zero against
+    2.9%, 8.6% below ten against 14.2%), because only regions the animal really
+    used can give 100 s in the first place.
+
+    The LEVEL here is far below the unmatched figure, because 100 s is less than
+    half a typical block: compare the lines on this figure with each other,
+    never with that one.
+
+    Only islands 1-4 (see :data:`DWELL_REGIONS`).
+    """
+    si = data.island_si_occ() if si is None else si
+    si = si.copy()
+    si["phase"] = si["phase"].fillna("")
+    column = "sig95_occ_matched" if matched else "sig95_occ"
+    si, slots, meta, pos, goals, goal_animals = _si_axis(si)
+    si = si[si["island"].isin(DWELL_REGIONS)]
+    fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
+    runs = _repeat_runs(meta)
+    for isl in DWELL_REGIONS:
+        colour = ISLAND_COLOURS[isl]
+        g = si[si["island"] == isl].groupby("slot")[column]
+        frac = np.array([100 * g.get_group(x).astype(bool).mean()
+                         if x in g.groups else np.nan for x in slots], float)
+        for j, run in enumerate(runs):
+            kw = {"label": ISLAND_WHERE[isl]} if j == 0 else {}
+            ax.plot(pos[run], frac[run], "-", color=colour, lw=_lw(1.4),
+                    zorder=4, **kw)
+        good = ~np.isnan(frac)
+        ax.plot(pos[good], frac[good], "o", ms=3.4, color=colour, mec="white",
+                mew=_lw(0.9), zorder=5)
+    ax.axhline(5, color=style.P.INK, lw=_lw(0.8), ls=(0, (4, 3)), zorder=1)
+    ax.text(pos[0] - 0.6, 5, " chance (5%)", fontsize=style.FS["tick"],
+            color=style.P.MUTED, va="bottom", ha="left")
+    style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
+    dwell = float(si["occ_target_s"].median()) if "occ_target_s" in si else 100.0
+    ax.set_ylabel("cells coding position\n"
+                  f"(% above shuffle, {dwell:.0f} s per island"
+                  + (f", {ISLAND_MATCH[1]} spikes)" if matched else ")"),
+                  fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
+    ax.set_ylim(bottom=0)
+    style.legend(ax, loc="upper left", ncol=2)
+    # The bridges are drawn pale on the key: they are not in this analysis.
+    style.maze_inset(ax.figure, ISLAND_COLOURS,
+                     bridge_colour=style.P.MUTED,
+                     bridge_dashes=ISLAND_DASH[maze.BRIDGE])
+    _dwell_report(si, name, column)
+    return style.save(fig, name)
+
+
+def island_sig_fraction_dwell_time(
+        trials=None, name="island_sig_fraction_dwell_time", si=None):
+    """:func:`island_sig_fraction_dwell` with the TIME matched and nothing else.
+
+    Each cell is tested at whatever spike count it fired in its 100 s. Useful
+    for seeing what the count matching costs and what it removes, and NOT the
+    test to quote: the pass rate still tracks spike count after the shuffle
+    (10%, 35%, 48%, 47%, 26% across quintiles), and the goal island keeps 34%
+    more spikes than the others in the same 100 s, so this version compares
+    statistical power along with coding.
+    """
+    return island_sig_fraction_dwell(trials, name=name, si=si, matched=False)
+
+
+# The names say what was held fixed, because the y label is the only other place
+# that says it and a file gets looked at long after its caption is lost:
+#   ..._dwell_time          100 s per island, each cell at its own spike count
+#   ..._dwell_time_spikes   100 s per island AND 40 spikes
+
+
+island_sig_fraction_dwell.si_source = data.island_si_occ
+island_sig_fraction_dwell_time.si_source = data.island_si_occ
+
+
+def _dwell_report(si, name, column):
+    """What the dwell-matched lines rest on."""
+    print(f"  {name}: dwell forced to "
+          f"{si['occ_target_s'].median():.0f} s per island per block; "
+          f"{si.groupby(['animal', 'date']).ngroups} sessions, "
+          f"{len(si)} cell-blocks.")
+    g = si.groupby("island")
+    for k in DWELL_REGIONS:
+        if k not in g.groups:
+            continue
+        d = g.get_group(k)
+        print(f"    {ISLAND_WHERE[k]:24} {int(d[column].sum()):5d}/{len(d):5d} = "
+              f"{100 * d[column].astype(bool).mean():4.0f}%   median spikes in "
+              f"the 100 s {int(d['n_spikes_occ'].median()):4d}")
+
+
 def island_spatial_info_bars_raw(trials=None,
                                  name="island_spatial_info_bars_raw", si=None):
     """:func:`island_spatial_info_bars` with no count matching, all cells.
@@ -1088,7 +1214,11 @@ def draw(name, trials, si=None, animals=None, combined=True):
     fn = REGISTRY[name]
     uses_si = _takes_si(fn)
     if uses_si and si is None:
-        si = data.island_si()
+        # Which table, asked of the function. Two tables exist now — the main
+        # one and the dwell-matched one — and a figure drawn from the wrong one
+        # raises on a missing column if you are lucky and plots nonsense if you
+        # are not. The attribute sits next to the function that needs it.
+        si = getattr(fn, "si_source", data.island_si)()
     out = []
     if combined:
         out += list(fn(trials, name=name, **({"si": si} if uses_si else {})))
@@ -1117,26 +1247,25 @@ def draw(name, trials, si=None, animals=None, combined=True):
 #:   +0.83 down to -0.08 to +0.35. What actually changes is the fraction of cells
 #:   coding position, which ``island_sig_fraction`` plots directly.
 DEFAULT_FIGURES = (
+    # the task
     "schematic_maze",
     "schematic_trial",
     "schematic_schedule",
+    # behaviour
     "detour_by_session",
     "detour_first_trial",
     "detour_trials_2_5",
     "success_rate",
     "trials_to_first_success",
-    "whole_maze_spatial_info",
-    "whole_maze_spatial_info_raw",
+    # how many cells code position, under each control in turn
     "island_sig_fraction",
     "island_sig_fraction_matched",
-    "island_spatial_info",
-    "island_spatial_info_sig",
-    "island_spatial_info_matched",
+    "island_sig_fraction_dwell_time",
+    "island_sig_fraction_dwell_time_spikes",
+    # how much they carry
+    "whole_maze_spatial_info",
     "island_spatial_info_matched_sig",
-    "island_spatial_info_bars",
     "island_spatial_info_bars_sig",
-    "island_spatial_info_bars_raw",
-    "island_spatial_info_bars_raw_sig",
 )
 
 #: name -> function. ``python -m analysis`` draws these.
@@ -1156,6 +1285,8 @@ REGISTRY = {
     "island_spatial_info_bars_raw_sig": island_spatial_info_bars_raw_sig,
     "island_sig_fraction": island_sig_fraction,
     "island_sig_fraction_matched": island_sig_fraction_matched,
+    "island_sig_fraction_dwell_time_spikes": island_sig_fraction_dwell,
+    "island_sig_fraction_dwell_time": island_sig_fraction_dwell_time,
     "detour_by_session": detour_by_session,
     "detour_first_trial": detour_first_trial,
     "detour_trials_2_5": detour_trials_2_5,

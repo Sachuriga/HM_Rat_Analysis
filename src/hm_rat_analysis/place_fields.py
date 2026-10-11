@@ -938,6 +938,87 @@ def shuffled_spatial_info_matched(occ, sample_idx, masks, windows, match,
     return out
 
 
+def _si_in_window_arrays(wy, wx, win, p_w, sigma):
+    """Skaggs over a window's scored bins, from spike bin indices in window
+    coordinates. The inner loop of every windowed shuffle in this module."""
+    h, w = win["shape"] if "shape" in win else (win["h"], win["w"])
+    ok = (wy >= 0) & (wy < h) & (wx >= 0) & (wx < w)
+    spk = np.bincount(wy[ok] * w + wx[ok], minlength=h * w)
+    spk = spk.reshape(h, w).astype(float)
+    if sigma and sigma > 0:
+        spk = gaussian_filter(spk, sigma)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lam = np.where(win["occ_s"] > 0, spk / win["occ_s"], 0.0)
+    lam_r = lam.ravel()[win["flat"]]
+    lam_mean = float((p_w * lam_r).sum())
+    if lam_mean <= 0:
+        return np.nan
+    ratio = lam_r / lam_mean
+    with np.errstate(divide="ignore", invalid="ignore"):
+        terms = np.where(lam_r > 0,
+                         p_w * ratio * np.log2(np.where(ratio > 0, ratio, 1.0)),
+                         0.0)
+    return float(np.nansum(terms))
+
+
+def shuffled_spatial_info_binmatched(occ, sample_idx, scored, windows, match_n,
+                                     repeats=4, n_shuffles=200,
+                                     min_shift_s=20.0, seed=0):
+    """Nulls for the bin-matched statistics, both of them, SYMMETRICALLY.
+
+    Returns ``{region: {"own": array, "matched": array}}``.
+
+    `own` thins nothing: the shifted spike train builds the map and the score is
+    read on the scored bins. `matched` thins the in-bin spikes to `match_n` and
+    averages `repeats` draws — the SAME averaging the observed value gets, which
+    is the point. A null whose entries are single draws is wider than a
+    statistic that is a mean of several, and comparing the two makes the test
+    conservative for a reason that has nothing to do with the data.
+    """
+    x, y, move = occ["x"], occ["y"], occ["move"]
+    sigma = occ["sigma"]
+    (xmin, xmax), (ymin, ymax) = occ["hist_kw"]["range"]
+    nbx, nby = occ["hist_kw"]["bins"]
+    move_idx = np.flatnonzero(move)
+    n = move_idx.size
+    out = {k: {"own": np.full(int(n_shuffles), np.nan),
+               "matched": np.full(int(n_shuffles), np.nan)} for k in scored}
+    if n < 10 or np.asarray(sample_idx).size == 0:
+        return out
+    xm, ym = x[move_idx], y[move_idx]
+    pos = np.searchsorted(move_idx, np.asarray(sample_idx, dtype=int))
+    lo = int(max(1, round(float(min_shift_s) / float(occ["dt"]))))
+    if n <= 2 * lo:
+        lo = max(1, n // 10)
+    gen = np.random.default_rng(seed)
+    p_w = {}
+    for k, w in windows.items():
+        p_w[k] = w["p"] if w is not None else None
+    for i in range(int(n_shuffles)):
+        sh = int(gen.integers(lo, max(lo + 1, n - lo)))
+        j = (pos + sh) % n
+        ix = np.clip(((xm[j] - xmin) / (xmax - xmin) * nbx).astype(int), 0, nbx - 1)
+        iy = np.clip(((ym[j] - ymin) / (ymax - ymin) * nby).astype(int), 0, nby - 1)
+        for k, sub in scored.items():
+            w = windows.get(k)
+            if w is None:
+                continue
+            wy, wx = iy - w["y0"], ix - w["x0"]
+            out[k]["own"][i] = _si_in_window_arrays(wy, wx, w, p_w[k], sigma)
+            inside = np.flatnonzero(sub[iy, ix])
+            if inside.size < int(match_n):
+                continue
+            vals = []
+            for _ in range(int(repeats)):
+                sel = inside[gen.choice(inside.size, int(match_n), replace=False)]
+                vals.append(_si_in_window_arrays(wy[sel], wx[sel], w, p_w[k],
+                                                 sigma))
+            vals = [q for q in vals if np.isfinite(q)]
+            if vals:
+                out[k]["matched"][i] = float(np.mean(vals))
+    return out
+
+
 def place_field_metrics(x, y, t, spike_times, extent, bins, dt, sigma, speed_thresh,
                         goal_xy=None, t0=None, t1=None,
                         field_frac=DEFAULT_FIELD_FRAC, min_peak_hz=DEFAULT_MIN_PEAK_HZ,

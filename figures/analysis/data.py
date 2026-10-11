@@ -39,7 +39,14 @@ def out_dir():
 
     So: the share must already be there. If it is not, say so and stop.
     """
-    if not ROOT.is_dir():
+    # Only guard the path that is actually AT RISK. The danger is creating a
+    # tree under an absent mount point; an OUT_DIR the caller put somewhere else
+    # (HM_FIG_DIR on the local disk, say, to keep working while the share is
+    # down) is not under that mount and needs no share at all. The first version
+    # of this guard demanded ROOT unconditionally and so blocked exactly the
+    # offline work it was meant to make safe.
+    under_root = ROOT == OUT_DIR or ROOT in OUT_DIR.parents
+    if under_root and not ROOT.is_dir():
         raise FileNotFoundError(
             f"{ROOT} is not reachable. The share is not mounted; remount it "
             f"and run again. Nothing was written.")
@@ -231,6 +238,138 @@ def island_si(root=None, cache=True, rebuild=False):
     if cache and not rebuild and f.exists():
         return pd.read_csv(f)
     out = build_island_si(root)
+    if cache:
+        out.to_csv(f, index=False)
+    return out
+
+
+#: Checkpoints for the dwell-matched walk, kept apart from the main ones so
+#: neither invalidates the other.
+OCC_CHECKPOINT_DIR = Path(os.environ.get(
+    "HM_OCC_CHECKPOINTS",
+    Path.home() / ".cache" / "hm_rat_analysis" / "island_si_occ"))
+
+
+def build_island_si_occ(root=None, progress=True, resume=True, **kw):
+    """Walk every session with each region's DWELL TIME forced equal.
+
+    The companion to :func:`build_island_si`. Same structure, same
+    checkpointing, a different question: see
+    :func:`islands.session_island_si_occmatched`.
+    """
+    root = ROOT if root is None else Path(root)
+    OCC_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    frames = []
+    sess = list(_sessions(root))
+    for i, (animal, date, d) in enumerate(sess, 1):
+        nwb = next((p for p in sorted(d.glob("*.nwb"))
+                    if not p.name.startswith("._")
+                    and not p.name.endswith(".tmp.nwb")), None)
+        if nwb is None:
+            continue
+        ck = OCC_CHECKPOINT_DIR / f"{animal}_{date}.parquet"
+        if resume and ck.exists():
+            if progress:
+                print(f"  [{i}/{len(sess)}] {animal} {date}  (checkpoint)",
+                      flush=True)
+            frames.append(pd.read_parquet(ck))
+            continue
+        if progress:
+            print(f"  [{i}/{len(sess)}] {animal} {date}", flush=True)
+        try:
+            f = islands.session_island_si_occmatched(nwb, **kw)
+        except Exception as e:                              # noqa: BLE001
+            print(f"      failed: {e}", flush=True)
+            continue
+        if not f.empty:
+            f.to_parquet(ck, index=False)
+            frames.append(f)
+    if not frames:
+        raise FileNotFoundError(f"no dwell-matched metrics built under {root}")
+    out = pd.concat(frames, ignore_index=True)
+    meta = (trials(root=root)[["animal", "date", "repeat", "session"]]
+            .drop_duplicates(["animal", "date"]))
+    out["date"] = out["date"].astype(str)
+    meta["date"] = meta["date"].astype(str)
+    out["phase"] = out["phase"].fillna("")
+    out = out.merge(meta, on=["animal", "date"], how="left")
+    out["slot"] = [slot_label(r, s, p) for r, s, p
+                   in zip(out["repeat"], out["session"], out["phase"])]
+    return out
+
+
+def island_si_occ(root=None, cache=True, rebuild=False, **kw):
+    """The dwell-matched table, from cache when one is there."""
+    root = ROOT if root is None else Path(root)
+    f = out_dir() / "island_spatial_info_occmatched.csv"
+    if cache and not rebuild and f.exists():
+        return pd.read_csv(f)
+    out = build_island_si_occ(root, **kw)
+    if cache:
+        out.to_csv(f, index=False)
+    return out
+
+
+#: Checkpoints for the bin-matched walk.
+BIN_CHECKPOINT_DIR = Path(os.environ.get(
+    "HM_BIN_CHECKPOINTS",
+    Path.home() / ".cache" / "hm_rat_analysis" / "island_si_bin"))
+
+
+def build_island_si_bin(root=None, progress=True, resume=True, **kw):
+    """Walk every session scoring an EQUAL NUMBER OF BINS per region.
+
+    Third of the three walks, and the one that leaves the animal's path alone:
+    see :func:`islands.session_island_si_binmatched`.
+    """
+    root = ROOT if root is None else Path(root)
+    BIN_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    frames = []
+    sess = list(_sessions(root))
+    for i, (animal, date, d) in enumerate(sess, 1):
+        nwb = next((p for p in sorted(d.glob("*.nwb"))
+                    if not p.name.startswith("._")
+                    and not p.name.endswith(".tmp.nwb")), None)
+        if nwb is None:
+            continue
+        ck = BIN_CHECKPOINT_DIR / f"{animal}_{date}.parquet"
+        if resume and ck.exists():
+            if progress:
+                print(f"  [{i}/{len(sess)}] {animal} {date}  (checkpoint)",
+                      flush=True)
+            frames.append(pd.read_parquet(ck))
+            continue
+        if progress:
+            print(f"  [{i}/{len(sess)}] {animal} {date}", flush=True)
+        try:
+            f = islands.session_island_si_binmatched(nwb, **kw)
+        except Exception as e:                              # noqa: BLE001
+            print(f"      failed: {e}", flush=True)
+            continue
+        if not f.empty:
+            f.to_parquet(ck, index=False)
+            frames.append(f)
+    if not frames:
+        raise FileNotFoundError(f"no bin-matched metrics built under {root}")
+    out = pd.concat(frames, ignore_index=True)
+    meta = (trials(root=root)[["animal", "date", "repeat", "session"]]
+            .drop_duplicates(["animal", "date"]))
+    out["date"] = out["date"].astype(str)
+    meta["date"] = meta["date"].astype(str)
+    out["phase"] = out["phase"].fillna("")
+    out = out.merge(meta, on=["animal", "date"], how="left")
+    out["slot"] = [slot_label(r, s, p) for r, s, p
+                   in zip(out["repeat"], out["session"], out["phase"])]
+    return out
+
+
+def island_si_bin(root=None, cache=True, rebuild=False, **kw):
+    """The bin-matched table, from cache when one is there."""
+    root = ROOT if root is None else Path(root)
+    f = out_dir() / "island_spatial_info_binmatched.csv"
+    if cache and not rebuild and f.exists():
+        return pd.read_csv(f)
+    out = build_island_si_bin(root, **kw)
     if cache:
         out.to_csv(f, index=False)
     return out

@@ -322,3 +322,434 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
         return pd.DataFrame(rows)
     finally:
         io.close()
+
+
+#: Seconds of occupancy every region is thinned to for the dwell-matched test.
+#: 100 s keeps 81% of the island blocks (37 of 44 goal-island, 105 of 132 other);
+#: the bridges carry a median of 46 s and mostly drop out, which is why this
+#: analysis is about the islands.
+OCC_TARGET_S = 100.0
+
+#: Shuffles for the dwell-matched test. Fewer than the main one because the
+#: thinned trajectory is a third the size, and two tests are run per region.
+OCC_SHUFFLES = 300
+
+
+def _occ_maps(xs, ys, dt, sigma, hist_kw):
+    """Raw and smoothed occupancy from an arbitrary set of frames."""
+    occ_raw, _, _ = np.histogram2d(xs, ys, **hist_kw)
+    occ_raw = occ_raw.T * float(dt)
+    occ_s = (PF.gaussian_filter(occ_raw, sigma) if (sigma and sigma > 0)
+             else occ_raw)
+    return occ_raw, occ_s
+
+
+def _occ_window(visited, occ_s, sigma, pad_sigma=3.0):
+    """Crop to the region plus a kernel margin. Exact: only in-region spikes are
+    ever placed, and the value is only ever read in-region."""
+    pad = int(np.ceil(pad_sigma * float(sigma))) + 1
+    ys, xs = np.nonzero(visited)
+    ny, nx = occ_s.shape
+    y0, y1 = max(0, ys.min() - pad), min(ny, ys.max() + pad + 1)
+    x0, x1 = max(0, xs.min() - pad), min(nx, xs.max() + pad + 1)
+    win = visited[y0:y1, x0:x1]
+    return {"y0": y0, "x0": x0, "h": y1 - y0, "w": x1 - x0,
+            "occ_s": occ_s[y0:y1, x0:x1], "flat": np.flatnonzero(win.ravel())}
+
+
+def _si_in_window(wy, wx, win, p_r, sigma):
+    """Skaggs bits/spike from spike bin indices already in window coordinates."""
+    h, w = win["h"], win["w"]
+    ok = (wy >= 0) & (wy < h) & (wx >= 0) & (wx < w)
+    spk = np.bincount(wy[ok] * w + wx[ok], minlength=h * w).reshape(h, w).astype(float)
+    if sigma and sigma > 0:
+        spk = PF.gaussian_filter(spk, sigma)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lam = np.where(win["occ_s"] > 0, spk / win["occ_s"], 0.0)
+    lam_r = lam.ravel()[win["flat"]]
+    lam_mean = float((p_r * lam_r).sum())
+    if lam_mean <= 0:
+        return np.nan
+    ratio = lam_r / lam_mean
+    with np.errstate(divide="ignore", invalid="ignore"):
+        terms = np.where(lam_r > 0,
+                         p_r * ratio * np.log2(np.where(ratio > 0, ratio, 1.0)),
+                         0.0)
+    return float(np.nansum(terms))
+
+
+def _occ_row(kx, ky, sp, occ_raw, occ_s, sigma, hist_kw, idx_r, p_r, visited,
+             shuffles, match_n, dt, min_shift_s, seed):
+    """One cell, on the thinned trajectory: SI, count-matched SI, and both nulls.
+
+    The shuffle slides the spike train along the KEPT frames, so the null sees
+    the same dwell time, the same occupancy and the same bin set as the observed
+    value, and differs from it only in whether the spikes are where the animal
+    was when it fired them.
+    """
+    (xmin, xmax), (ymin, ymax) = hist_kw["range"]
+    nbx, nby = hist_kw["bins"]
+    win = _occ_window(visited, occ_s, sigma)
+    # Prior restricted to the window, in the window's own flat order.
+    full = np.zeros(occ_raw.size, dtype=float)
+    full[idx_r] = p_r
+    p_win = full.reshape(occ_raw.shape)[win["y0"]:win["y0"] + win["h"],
+                                        win["x0"]:win["x0"] + win["w"]]
+    p_w = p_win.ravel()[win["flat"]]
+
+    bx = np.clip(((kx - xmin) / (xmax - xmin) * nbx).astype(int), 0, nbx - 1)
+    by = np.clip(((ky - ymin) / (ymax - ymin) * nby).astype(int), 0, nby - 1)
+    wy_all, wx_all = by - win["y0"], bx - win["x0"]
+
+    n = kx.size
+    sp = np.asarray(sp, dtype=int)
+    out = {"n_spikes_occ": int(sp.size)}
+    out["si_occ"] = _si_in_window(wy_all[sp], wx_all[sp], win, p_w, sigma)
+
+    gen = np.random.default_rng(seed)
+    out[f"si_occ_m{match_n}"] = np.nan
+    if sp.size >= match_n:
+        vals = [_si_in_window(wy_all[sel], wx_all[sel], win, p_w, sigma)
+                for sel in (sp[gen.choice(sp.size, match_n, replace=False)]
+                            for _ in range(SI_MATCH_REPEATS))]
+        out[f"si_occ_m{match_n}"] = float(np.nanmean(vals)) if vals else np.nan
+
+    lo = int(max(1, round(float(min_shift_s) / float(dt))))
+    if n <= 2 * lo:
+        lo = max(1, n // 10)
+    null, null_m = [], []
+    for _ in range(int(shuffles)):
+        sh = int(gen.integers(lo, max(lo + 1, n - lo)))
+        j = (sp + sh) % n
+        null.append(_si_in_window(wy_all[j], wx_all[j], win, p_w, sigma))
+        if sp.size >= match_n:
+            jm = j[gen.choice(j.size, match_n, replace=False)]
+            null_m.append(_si_in_window(wy_all[jm], wx_all[jm], win, p_w, sigma))
+    for tag, vals, obs in (("", null, out["si_occ"]),
+                           ("_matched", null_m, out[f"si_occ_m{match_n}"])):
+        v = np.asarray([q for q in vals if np.isfinite(q)], dtype=float)
+        if v.size and np.isfinite(obs):
+            out[f"si_occ_null_p95{tag}"] = float(np.percentile(v, 95))
+            out[f"si_occ_null_p{tag}"] = float((np.sum(v >= obs) + 1) / (v.size + 1))
+            out[f"sig95_occ{tag}"] = bool(obs > np.percentile(v, 95))
+        else:
+            out[f"si_occ_null_p95{tag}"] = np.nan
+            out[f"si_occ_null_p{tag}"] = np.nan
+            out[f"sig95_occ{tag}"] = False
+    return out
+
+
+def session_island_si_occmatched(nwb_path, bin_cm=2.5, smooth_cm=5.0,
+                                 speed=SPEED_THRESH, min_occ_s=PF.DEFAULT_MIN_OCC_S,
+                                 radius_m=maze.ISLAND_BIN_RADIUS_M,
+                                 target_s=OCC_TARGET_S, shuffles=OCC_SHUFFLES,
+                                 match_n=40, min_shift_s=MIN_SHIFT_S, seed=0):
+    """Spatial information with every region's DWELL TIME forced equal.
+
+    The main table controls spike count. It does not control how long the animal
+    spent in a region, and that is the confound this answers: the animal lingers
+    on the island the goal is on (median 239 s against 150 s elsewhere), and
+    longer exposure makes a rate map more reliable and a shuffle test easier to
+    beat. Stratifying after the fact showed the goal-island effect surviving at
+    matched dwell, but stratifying is a comparison between unequal things that
+    happen to be near each other. This removes the difference at source.
+
+    Per block and region: take the moving frames inside the region, keep a
+    random `target_s` seconds of them, and build the occupancy, the rate maps and
+    the shuffle null from THAT and nothing else. Regions with less than
+    `target_s` to give are not scored.
+
+    One draw of frames per (block, region), fixed by `seed`, shared by the
+    observed value and by every shuffle. The null is then built on the identical
+    thinned trajectory, so whichever frames the draw happened to pick is common
+    to both sides and cancels in the test.
+
+    Spikes are placed at their nearest kept frame rather than interpolated: the
+    thinned trajectory has gaps everywhere by construction, and interpolating
+    across them would plant spikes on paths the animal never ran.
+
+    Columns: as the main table for the identifying fields, plus ``occ_target_s``,
+    ``si_occ`` (every spike in the thinned window), ``si_occ_m{match_n}``,
+    ``sig95_occ`` and ``sig95_occ_matched``, with ``n_spikes_occ`` behind them.
+    """
+    path = str(nwb_path)
+    io = NWBHDF5IO(path, "r", load_namespaces=True)
+    try:
+        nwb = io.read()
+        subj = nwb.subject.subject_id if nwb.subject is not None else "?"
+        animal = f"Rat{int(subj)}" if str(subj).isdigit() else str(subj)
+        date = str(nwb.session_id) if nwb.session_id else ""
+        if nwb.units is None:
+            return pd.DataFrame()
+        udf = nwb.units.to_dataframe()
+        ql = (udf["quality_label"].astype(str) if "quality_label" in udf
+              else pd.Series(QUALITY, index=udf.index))
+        pos = nwbio.load_position(nwb)
+        if pos is None:
+            return pd.DataFrame()
+        t_raw = pos[2]
+        dt = float(np.median(np.diff(t_raw))) if t_raw.size > 1 else 1.0 / 30
+        trials, windows, _src = SS._trial_windows(Path(path).parent, nwb, t_raw)
+        if not windows:
+            return pd.DataFrame()
+        px, py = pos[0] / maze.SCALE_X, pos[1] / maze.SCALE_Y
+
+        ext = maze.MAZE_EXTENT
+        bm = bin_cm / 100.0
+        bins = (max(5, int(round((ext[1] - ext[0]) / bm))),
+                max(5, int(round((ext[3] - ext[2]) / bm))))
+        bx_cm, _ = PF.bin_size_cm(ext, bins)
+        sigma = float(smooth_cm) / bx_cm
+        isl = maze.bin_islands(ext, bins, radius_m=radius_m)
+        nbx, nby = bins
+        hist_kw = {"bins": [nbx, nby], "range": [[ext[0], ext[1]], [ext[2], ext[3]]]}
+        n_keep = int(round(float(target_s) / dt))
+
+        um = SS._unit_metrics(nwb, udf, windows=windows)
+        keep_u = (ql == QUALITY) & (um["cell_type"] == CELL_TYPE)
+
+        rows = []
+        for phase, seg in _phase_segments(trials):
+            wins = SS._merge_windows([(float(a), float(b))
+                                      for (_tt, _g, _sn, a, b) in seg
+                                      if np.isfinite(a) and np.isfinite(b) and b > a])
+            if not wins:
+                continue
+            prep = SS._prep_positions(px, py, t_raw, wins, dt)
+            if prep is None:
+                continue
+            x, y, tt, spd = prep
+            move = spd > speed if speed > 0 else np.ones_like(x, dtype=bool)
+            mi = np.flatnonzero(move)
+            if mi.size < 10:
+                continue
+            fx, fy, ft = x[mi], y[mi], tt[mi]
+            ix = np.clip(((fx - ext[0]) / (ext[1] - ext[0]) * nbx).astype(int),
+                         0, nbx - 1)
+            iy = np.clip(((fy - ext[2]) / (ext[3] - ext[2]) * nby).astype(int),
+                         0, nby - 1)
+            goal = _goal_node(seg)
+            gen = np.random.default_rng(seed)
+
+            for k in maze.REGIONS:
+                region = isl == k
+                here = np.flatnonzero(region[iy, ix])
+                if here.size < n_keep:
+                    continue
+                # One draw, kept in time order so a circular shift still slides
+                # the spike train ALONG the path rather than through a shuffled
+                # bag of frames.
+                sel = np.sort(gen.choice(here.size, n_keep, replace=False))
+                fsel = here[sel]
+                kx, ky, kt = fx[fsel], fy[fsel], ft[fsel]
+                occ_raw, occ_s = _occ_maps(kx, ky, dt, sigma, hist_kw)
+                visited = PF.valid_bins(occ_raw, occ_s, sigma, min_occ_s) & region
+                if not visited.any():
+                    continue
+                priors = PF.region_priors(occ_raw, {k: visited})
+                idx_r, p_r = priors[k]
+                if p_r is None or idx_r.size == 0:
+                    continue
+                kept_set = np.empty(mi.size, dtype=bool)
+                kept_set[:] = False
+                kept_set[fsel] = True
+                pos_in_kept = np.full(mi.size, -1, dtype=int)
+                pos_in_kept[fsel] = np.arange(fsel.size)
+
+                for u in udf.index[keep_u]:
+                    st = np.asarray(udf.loc[u, "spike_times"], dtype=float)
+                    st = st[SS._in_windows(st, wins)]
+                    if st.size == 0:
+                        continue
+                    # Nearest MOVING frame, then only the ones that survived the
+                    # draw. No interpolation: the thinned path is all gaps.
+                    j = np.clip(np.searchsorted(ft, st), 1, ft.size - 1)
+                    near = np.where(np.abs(ft[j] - st) <= np.abs(st - ft[j - 1]),
+                                    j, j - 1)
+                    near = near[kept_set[near]]
+                    if near.size == 0:
+                        continue
+                    sp = pos_in_kept[near]
+                    row = _occ_row(kx, ky, sp, occ_raw, occ_s, sigma, hist_kw,
+                                   idx_r, p_r, visited, shuffles, match_n,
+                                   dt, min_shift_s, seed)
+                    row.update({"animal": animal, "date": date, "phase": phase,
+                                "goal_node": goal, "island": k,
+                                "unit_id": int(udf.loc[u, "unit_id"])
+                                if "unit_id" in udf.columns else int(u),
+                                "occ_target_s": float(n_keep * dt),
+                                "n_valid_bins_occ": int(visited.sum())})
+                    rows.append(row)
+        return pd.DataFrame(rows)
+    finally:
+        io.close()
+
+
+#: Valid bins every region is scored on. 500 keeps 90% of the island blocks
+#: (39 of 44 goal-island, 120 of 132 other). The animal's path is NOT touched:
+#: this picks a fixed-size sample of the bins it visited and scores only those.
+BIN_TARGET = 500
+
+#: Shuffles for the bin-matched test, and the number of thinning draws averaged
+#: into BOTH the observed count-matched value and each shuffle of it.
+#:
+#: Symmetric on purpose. The main table averages the observed value over 8 draws
+#: and compares it against a null whose every entry is a SINGLE draw, which
+#: makes the null wider than the statistic it judges and the test conservative:
+#: measured on this data the draw-to-draw SD is 0.140 against a null SD of
+#: 0.178, so roughly 62% of the null's width is thinning noise the observed
+#: value does not carry. Averaging both sides by the same amount removes that.
+BIN_SHUFFLES = 200
+BIN_MATCH_REPEATS = 4
+
+
+def _bin_subset(mask, target, gen):
+    """A fixed-size random sample of the bins in `mask`. None if too few."""
+    idx = np.flatnonzero(mask.ravel())
+    if idx.size < int(target):
+        return None
+    keep = gen.choice(idx.size, int(target), replace=False)
+    out = np.zeros(mask.size, dtype=bool)
+    out[idx[keep]] = True
+    return out.reshape(mask.shape)
+
+
+def _si_from_spikes(wy, wx, win, p_w, sigma, sel=None):
+    """Skaggs over the window's scored bins, from spike bin indices."""
+    if sel is not None:
+        wy, wx = wy[sel], wx[sel]
+    return PF._si_in_window_arrays(wy, wx, win, p_w, sigma)
+
+
+def session_island_si_binmatched(nwb_path, bin_cm=2.5, smooth_cm=5.0,
+                                 speed=SPEED_THRESH,
+                                 min_occ_s=PF.DEFAULT_MIN_OCC_S,
+                                 radius_m=maze.ISLAND_BIN_RADIUS_M,
+                                 target_bins=BIN_TARGET, match_n=40,
+                                 shuffles=BIN_SHUFFLES,
+                                 repeats=BIN_MATCH_REPEATS,
+                                 min_shift_s=MIN_SHIFT_S, seed=0):
+    """Spatial information scored on an EQUAL NUMBER OF BINS per region.
+
+    The dwell-matched analysis equalised exposure by throwing away time, which
+    also throws away the places the animal went: the occupancy map itself
+    shrinks, and a rate map on a smaller map is a different measurement. This
+    does not touch the trajectory, the occupancy or the spikes. It picks
+    `target_bins` of the bins the animal actually visited in that region, and
+    scores only those.
+
+    Why bins. Dwell time and the number of visited bins are nearly the same
+    variable here (Spearman 0.87), and it is the BIN COUNT that enters the
+    estimate: Skaggs asks how concentrated a cell's firing is across the bins it
+    is summed over, and a region offering 886 bins gives more room to look
+    concentrated than one offering 548. Matching the spike count does not touch
+    that path, which is why it only moved the dwell correlation from +0.72 to
+    +0.62. Matching the bins cuts it directly.
+
+    One draw of bins per (block, region), fixed by `seed` and shared by the
+    observed value and every shuffle, so which bins were picked cancels.
+
+    Columns mirror the main table with a ``_bm`` suffix, plus ``n_bins_bm`` and
+    ``n_spikes_bm`` (spikes landing in the scored bins).
+    """
+    path = str(nwb_path)
+    io = NWBHDF5IO(path, "r", load_namespaces=True)
+    try:
+        nwb = io.read()
+        subj = nwb.subject.subject_id if nwb.subject is not None else "?"
+        animal = f"Rat{int(subj)}" if str(subj).isdigit() else str(subj)
+        date = str(nwb.session_id) if nwb.session_id else ""
+        if nwb.units is None:
+            return pd.DataFrame()
+        udf = nwb.units.to_dataframe()
+        ql = (udf["quality_label"].astype(str) if "quality_label" in udf
+              else pd.Series(QUALITY, index=udf.index))
+        pos = nwbio.load_position(nwb)
+        if pos is None:
+            return pd.DataFrame()
+        t_raw = pos[2]
+        dt = float(np.median(np.diff(t_raw))) if t_raw.size > 1 else 1.0 / 30
+        trials, windows, _src = SS._trial_windows(Path(path).parent, nwb, t_raw)
+        if not windows:
+            return pd.DataFrame()
+        px, py = pos[0] / maze.SCALE_X, pos[1] / maze.SCALE_Y
+        ext = maze.MAZE_EXTENT
+        bm = bin_cm / 100.0
+        bins = (max(5, int(round((ext[1] - ext[0]) / bm))),
+                max(5, int(round((ext[3] - ext[2]) / bm))))
+        bx_cm, _ = PF.bin_size_cm(ext, bins)
+        sigma = float(smooth_cm) / bx_cm
+        isl = maze.bin_islands(ext, bins, radius_m=radius_m)
+        um = SS._unit_metrics(nwb, udf, windows=windows)
+        keep_u = (ql == QUALITY) & (um["cell_type"] == CELL_TYPE)
+
+        rows = []
+        for phase, seg in _phase_segments(trials):
+            wins = SS._merge_windows([(float(a), float(b))
+                                      for (_tt, _g, _sn, a, b) in seg
+                                      if np.isfinite(a) and np.isfinite(b) and b > a])
+            if not wins:
+                continue
+            prep = SS._prep_positions(px, py, t_raw, wins, dt)
+            if prep is None:
+                continue
+            x, y, tt, spd = prep
+            occ = PF.occupancy_parts(x, y, tt, ext, bins, dt, sigma,
+                                     speed_thresh=speed, speed=spd)
+            if occ is None:
+                continue
+            visited = PF.valid_bins(occ["occ_raw"], occ["occ_s"], sigma, min_occ_s)
+            goal = _goal_node(seg)
+            gen = np.random.default_rng(seed)
+            scored, priors = {}, {}
+            for k in maze.ISLANDS:
+                sub = _bin_subset(visited & (isl == k), target_bins, gen)
+                if sub is None:
+                    continue
+                scored[k] = sub
+                priors[k] = PF.region_priors(occ["occ_raw"], {k: sub})[k]
+            if not scored:
+                continue
+            wins_r = PF.region_windows(occ, scored, priors)
+
+            for u in udf.index[keep_u]:
+                st = np.asarray(udf.loc[u, "spike_times"], dtype=float)
+                st = st[SS._in_windows(st, wins)]
+                spk_s, sx, sy, sidx = PF.spike_parts(occ, st, return_index=True)
+                if sx.size == 0:
+                    continue
+                rate = PF.rate_from_maps(spk_s, occ["occ_s"], visited)
+                lam = rate.filled(0.0)
+                raw_spk, _, _ = np.histogram2d(sx, sy, **occ["hist_kw"])
+                raw_spk = raw_spk.T
+                null = PF.shuffled_spatial_info_binmatched(
+                    occ, sidx, scored, wins_r, match_n, repeats=repeats,
+                    n_shuffles=shuffles, min_shift_s=min_shift_s, seed=seed)
+                for k, sub in scored.items():
+                    si, occ_s, nb = PF.spatial_info_in(lam, occ["occ_raw"], sub)
+                    sim = PF.spatial_info_in_matched(
+                        occ, sx, sy, sub, visited, match_n, repeats=repeats,
+                        seed=seed)
+                    row = {"animal": animal, "date": date, "phase": phase,
+                           "goal_node": goal, "island": k,
+                           "unit_id": int(udf.loc[u, "unit_id"])
+                           if "unit_id" in udf.columns else int(u),
+                           "si_bm": si, "si_bm_m": sim,
+                           "n_bins_bm": nb, "occ_s_bm": float(occ_s),
+                           "n_spikes_bm": int(raw_spk[sub].sum())}
+                    for tag, obs, vals in (("", si, null[k]["own"]),
+                                           ("_m", sim, null[k]["matched"])):
+                        v = np.asarray([q for q in vals if np.isfinite(q)])
+                        if v.size and np.isfinite(obs):
+                            row[f"si_bm{tag}_null_p95"] = float(np.percentile(v, 95))
+                            row[f"si_bm{tag}_null_p"] = float(
+                                (np.sum(v >= obs) + 1) / (v.size + 1))
+                            row[f"sig95_bm{tag}"] = bool(obs > np.percentile(v, 95))
+                        else:
+                            row[f"si_bm{tag}_null_p95"] = np.nan
+                            row[f"si_bm{tag}_null_p"] = np.nan
+                            row[f"sig95_bm{tag}"] = False
+                    rows.append(row)
+        return pd.DataFrame(rows)
+    finally:
+        io.close()
