@@ -33,6 +33,29 @@ plt.rcParams.update({
 })
 
 
+#: The regions, in the order the legends list them, and how each is drawn.
+#: Defined HERE and not in plots.py because schematic.py needs them too, and a
+#: schematic that imported plots to get a colour made the two modules import
+#: each other: importing plots first happened to work, importing schematic first
+#: raised AttributeError on a partially initialised module.
+ISLAND_ORDER = (4, 3, 2, 1, 5)
+ISLAND_WHERE = {4: "island 4 (left)", 3: "island 3 (centre-left)",
+                2: "island 2 (centre-right)", 1: "island 1 (right)",
+                5: "bridges (5 pooled)"}
+ISLAND_SHORT = {0: "whole", 4: "isl 4", 3: "isl 3", 2: "isl 2", 1: "isl 1",
+                5: "bridges"}
+ISLAND_COLOURS = {4: P.BLUE, 3: P.GREEN_DARK, 2: P.AMBER_INK, 1: P.RED,
+                  5: P.INK}
+#: The bridges are drawn dashed: they are corridors between the islands, not one
+#: of them, and a fifth solid line would read as a fifth island.
+ISLAND_DASH = {5: (3.5, 2.0)}
+
+
+def lw(w):
+    """Line width, floored so nothing vanishes at print size."""
+    return P.lw(w)
+
+
 def new_figure(width_mm=180.0, height_mm=70.0, left_mm=18.0, right_mm=3.0,
                top_mm=7.0, bottom_mm=20.0):
     """A single-panel figure sized in MM, with margins that hold real text.

@@ -17,6 +17,8 @@ to look for meaning in the irregularity. Distances quoted in the captions come
 from the MEASURED positions, so the numbers stay true to the maze.
 """
 
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 import networkx as nx
@@ -24,7 +26,7 @@ import networkx as nx
 from hm_rat_analysis import behaviour, maze
 
 from analysis import data, style
-from analysis.plots import ISLAND_COLOURS, ISLAND_DASH, _lw
+from analysis.style import ISLAND_COLOURS, ISLAND_DASH, lw as _lw
 
 #: The goal nodes each animal was run to, in order. From the behavioural table
 #: (``data.slot_goals``); hard-coded here only so the schematic can be drawn
@@ -433,3 +435,74 @@ def _report_schedule(name):
           f"{roam.min()}-{roam.max()}. The strips show a typical session, not a "
           f"fixed one. Type 6 opens the SECOND session of each new goal and is "
           f"drawn unnamed: nothing in the sheets says what it is.")
+
+
+def maze_map(out_dir=None, name="hexmaze_map", width_mm=297.0, height_mm=210.0,
+             idealised=True, node_ms=19.0, label_pt=7.0):
+    """A printable map of the maze with every node numbered.
+
+    Not a schematic: this one exists to be looked at next to the apparatus, so
+    the node id is the point and everything else serves it. A4 landscape, which
+    is the smallest page that fits 96 three-digit labels at a readable size.
+
+    `idealised` draws the regular honeycomb from the graph's topology. The
+    measured node positions wobble by up to 0.15 m, and on a map that reads as
+    information rather than as measurement error; the two differ in how a node
+    LOOKS, never in which nodes it joins. Pass False for the measured layout.
+
+    Saves to `out_dir` (default the Desktop) as PDF and PNG, and returns the
+    paths. Background is transparent, as everything else in this folder is; on
+    paper and in any viewer with a white page it prints white.
+    """
+    out = Path(out_dir) if out_dir is not None else Path.home() / "Desktop"
+    out.mkdir(parents=True, exist_ok=True)
+    fig, ax = style.new_figure(width_mm=width_mm, height_mm=height_mm,
+                               left_mm=4.0, right_mm=4.0, top_mm=4.0,
+                               bottom_mm=4.0)
+    G = maze.build_graph()
+    pos = (maze.idealised_positions(G) if idealised
+           else {str(k): v for k, v in maze.node_positions_m().items()})
+    draw_maze(ax, pos=pos, G=G, lw=1.6)
+    _maze_axes(ax, pos, pad=0.62)
+
+    real = maze.node_positions_m()
+    for a, b in maze.bridge_edges(G):
+        if a not in pos or b not in pos:
+            continue
+        d = float(np.hypot(*(np.array(real[int(a)]) - np.array(real[int(b)]))))
+        mx = 0.5 * (pos[a][0] + pos[b][0])
+        my = 0.5 * (pos[a][1] + pos[b][1])
+        ax.text(mx, my - 0.10, f"{d:.2f} m", ha="center", va="bottom",
+                fontsize=style.FS["tick"], color=style.P.INK,
+                bbox=dict(boxstyle="round,pad=0.14", fc="white", ec="none",
+                          alpha=0.9), zorder=6)
+
+    # Every node, with its id inside it. The circle has to be wide enough to
+    # hold three digits in its WHITE interior: the first try used a 7 pt marker
+    # and island-coloured text, and the outer digits landed on the same-coloured
+    # rim, where they were invisible. Only the middle digit of each id could be
+    # read. So: a circle sized from the label, a thin rim, and dark text.
+    for n, (x, y) in pos.items():
+        colour = ISLAND_COLOURS.get(maze.island_of_node(n)) or style.P.MUTED
+        ax.plot(x, y, "o", ms=node_ms, mfc="white", mec=colour,
+                mew=_lw(1.3), zorder=7)
+        ax.text(x, y, str(n), ha="center", va="center", fontsize=label_pt,
+                color=style.P.INK, zorder=8)
+    _island_numbers(ax, pos, G, dy=0.26, fs=style.FS["label"] + 1)
+    _scale_bar(ax)
+
+    written = []
+    for suffix, extra in ((".pdf", {}), (".png", dict(dpi=600))):
+        f = (out / name).with_suffix(suffix)
+        fig.savefig(f, transparent=True, **extra)
+        written.append(f)
+    plt.close(fig)
+    spacing = _within_island_spacing(G, real)
+    print(f"  {name}: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges. "
+          f"Within-island step {spacing:.2f} m; bridges 0.68, 0.69, 0.70, 1.86, "
+          f"1.99 m. Layout is the "
+          + ("idealised honeycomb" if idealised else "measured positions")
+          + "; the bridge lengths are measured either way.")
+    for f in written:
+        print(f"  wrote {f}  ({f.stat().st_size / 1024:.0f} KB)")
+    return written

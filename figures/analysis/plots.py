@@ -14,7 +14,7 @@ import numpy as np
 
 from hm_rat_analysis import islands, maze
 
-from analysis import data, style
+from analysis import data, schematic, style
 
 #: Axis label used wherever the detour is plotted, so the figures agree.
 DETOUR_LABEL = "path inefficiency\n$\\log_{10}$(actual / optimal hops)"
@@ -383,15 +383,6 @@ def trials_to_first_success(trials, name="trials_to_first_success"):
 #: The regions in the order they sit along the maze, then the bridges. Node ids
 #: run right to left, so the legend says WHERE each island is rather than leaving
 #: "1" to be guessed from the number.
-ISLAND_ORDER = (4, 3, 2, 1, 5)
-ISLAND_WHERE = {4: "island 4 (left)", 3: "island 3 (centre-left)",
-                2: "island 2 (centre-right)", 1: "island 1 (right)",
-                5: "bridges (5 pooled)"}
-ISLAND_COLOURS = {4: style.P.BLUE, 3: style.P.GREEN_DARK,
-                  2: style.P.AMBER_INK, 1: style.P.RED, 5: style.P.INK}
-#: The bridges are drawn dashed: they are corridors between the islands, not one
-#: of them, and a fifth solid line would read as a fifth island.
-ISLAND_DASH = {5: (3.5, 2.0)}
 
 
 def _blocks(si):
@@ -596,15 +587,13 @@ def _si_exposure(si, name, column, header=True):
               f"median occupancy {d['occ_s'].median():6.0f} s")
 
 
-ISLAND_ORDER = (4, 3, 2, 1, 5)
-ISLAND_WHERE = {4: "island 4 (left)", 3: "island 3 (centre-left)",
-                2: "island 2 (centre-right)", 1: "island 1 (right)",
-                5: "bridges (5 pooled)"}
-ISLAND_SHORT = {0: "whole", 4: "isl 4", 3: "isl 3", 2: "isl 2", 1: "isl 1",
-                5: "bridges"}
-ISLAND_COLOURS = {4: style.P.BLUE, 3: style.P.GREEN_DARK,
-                  2: style.P.AMBER_INK, 1: style.P.RED, 5: style.P.INK}
-ISLAND_DASH = {5: (3.5, 2.0)}
+# Re-exported from style, which is where they live now; the names are kept so
+# the figures below read as they did.
+ISLAND_ORDER = style.ISLAND_ORDER
+ISLAND_WHERE = style.ISLAND_WHERE
+ISLAND_SHORT = style.ISLAND_SHORT
+ISLAND_COLOURS = style.ISLAND_COLOURS
+ISLAND_DASH = style.ISLAND_DASH
 
 #: Spikes each region's count-matched estimate is thinned to. Skaggs bits/spike
 #: is biased upward at low counts and the counts here FALL as trials shorten with
@@ -748,7 +737,7 @@ def island_spatial_info_matched(trials_unused=None,
 
 
 def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars",
-                             si=None, column=None, sig_only=False):
+                             si=None, column=None, sig_only=False, matched=True):
     """Count-matched spatial information per region, one bar per goal.
 
     Nineteen slots times six lines is too much to read a trend off, so this
@@ -763,7 +752,9 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
     matched higher and stands on its own.
     """
     si = data.island_si() if si is None else si
-    top = _shared_top(si, {k: _matched_column(k) for k in (0,) + ISLAND_ORDER})
+    cols = {k: (_matched_column(k) if matched else "spatial_info")
+            for k in (0,) + ISLAND_ORDER}
+    top = _shared_top(si, cols)
     if sig_only:
         _pass_rates(_blocks(si), name)
         si = _significant(si)
@@ -780,7 +771,7 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
         d = si[si["repeat"] == rep]
         xs, med, lo, hi, ns = [], [], [], [], []
         for ri, k in enumerate(regions):
-            col = _matched_column(k)
+            col = cols[k]
             v = d.loc[d["island"] == k, col].dropna()
             xs.append(ri - 0.40 + width * (gi + 0.5))
             med.append(v.median() if len(v) else np.nan)
@@ -800,11 +791,14 @@ def island_spatial_info_bars(trials_unused=None, name="island_spatial_info_bars"
                     transform=ax.get_xaxis_transform(), zorder=6)
 
     ax.set_xticks(range(len(regions)))
-    ax.set_xticklabels([f"{ISLAND_SHORT[k]}\n({ISLAND_MATCH[k]} spk)"
+    ax.set_xticklabels([f"{ISLAND_SHORT[k]}" + (f"\n({ISLAND_MATCH[k]} spk)"
+                                                if matched else "")
                         for k in regions], fontsize=style.FS["tick"],
                        color=style.P.INK)
     ax.set_xlim(-0.6, len(regions) - 0.4)
-    ax.set_ylabel("spatial information\n(bits/spike at matched count)",
+    ax.set_ylabel("spatial information\n"
+                  + ("(bits/spike at matched count)" if matched
+                     else "(bits/spike, every spike used)"),
                   fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
     ax.set_ylim(0, top)
     style.legend(ax, loc="upper right", ncol=2)
@@ -929,6 +923,28 @@ def _whole_maze_report(si, name, column):
           f"against {si[column].median():.2f} matched, which is the count bias.")
 
 
+def island_spatial_info_bars_raw(trials=None,
+                                 name="island_spatial_info_bars_raw", si=None):
+    """:func:`island_spatial_info_bars` with no count matching, all cells.
+
+    The twin of the matched bars. Every region is read from the same column
+    here, so unlike the matched version the five of them are NOT on a common
+    footing: the bridges carry a median of 20 spikes against an island's 106 to
+    149, and Skaggs bits/spike rises as counts fall, so the bridges' bar is
+    flattered. That is the whole reason the matched version exists, and seeing
+    the two side by side is the point of keeping this one.
+    """
+    return island_spatial_info_bars(trials, name=name, si=si, matched=False)
+
+
+def island_spatial_info_bars_raw_sig(trials=None,
+                                     name="island_spatial_info_bars_raw_sig",
+                                     si=None):
+    """:func:`island_spatial_info_bars_raw`, significant cell-blocks only."""
+    return island_spatial_info_bars(trials, name=name, si=si, matched=False,
+                                    sig_only=True)
+
+
 def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None,
                         matched=False):
     """The FRACTION of cells that beat their own shuffle, per block and region.
@@ -1048,11 +1064,6 @@ def _takes_si(fn):
     return "si" in inspect.signature(fn).parameters
 
 
-# Imported HERE and not at the top of the file on purpose. `schematic` reads
-# ISLAND_COLOURS and _lw from this module, so the two import each other; by this
-# line both exist, and an import at the top would run schematic before they do.
-from analysis import schematic                                      # noqa: E402
-
 #: Figures that are the SAME for every animal, so `draw` writes one file instead
 #: of one per animal. The schematics explain the apparatus and the protocol, both
 #: of which the animals share; only their goal nodes differ, and the maze
@@ -1124,6 +1135,8 @@ DEFAULT_FIGURES = (
     "island_spatial_info_matched_sig",
     "island_spatial_info_bars",
     "island_spatial_info_bars_sig",
+    "island_spatial_info_bars_raw",
+    "island_spatial_info_bars_raw_sig",
 )
 
 #: name -> function. ``python -m analysis`` draws these.
@@ -1139,6 +1152,8 @@ REGISTRY = {
     "island_spatial_info_sig": island_spatial_info_sig,
     "island_spatial_info_matched_sig": island_spatial_info_matched_sig,
     "island_spatial_info_bars_sig": island_spatial_info_bars_sig,
+    "island_spatial_info_bars_raw": island_spatial_info_bars_raw,
+    "island_spatial_info_bars_raw_sig": island_spatial_info_bars_raw_sig,
     "island_sig_fraction": island_sig_fraction,
     "island_sig_fraction_matched": island_sig_fraction_matched,
     "detour_by_session": detour_by_session,
