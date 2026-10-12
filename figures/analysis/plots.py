@@ -1071,6 +1071,96 @@ def island_spatial_info_bars_raw_sig(trials=None,
                                     sig_only=True)
 
 
+def island_moving_time(trials_unused=None, name="island_moving_time", si=None,
+                       bridges=True):
+    """Moving time on each island, block by block, with the goal island marked.
+
+    The exposure behind every spatial-information value in this folder, drawn on
+    its own because it turned out to drive several things that looked like
+    coding. A ring marks the island the goal was on in that block: the line
+    under the ring is the one that rises.
+
+    This is ``occ_s``, which is RUNNING time, not time spent. Three filters
+    build it: trial windows only, so the gaps between trials are out; speed
+    above 0.05 m/s, which removes about two thirds of the frames, so an animal
+    sitting still contributes nothing; and only that island's visited bins. On
+    one session the chain runs 3994 s of video, 2397 s inside trials, 817 s of
+    running.
+
+    Note what the trial windows include. Two thirds of that time is free
+    roaming, because each session carries three ten-minute periods against about
+    13 minutes of goal trials in total. So this is mostly where the animal went
+    while exploring.
+    """
+    si = data.island_si() if si is None else si
+    si = si.copy()
+    si["phase"] = si["phase"].fillna("")
+    si, slots, meta, pos, goals, goal_animals = _si_axis(si)
+    regions = ISLAND_ORDER if bridges else tuple(k for k in ISLAND_ORDER if k != 5)
+    fig, ax = style.new_figure(height_mm=100.0, bottom_mm=26.0, top_mm=24.0)
+    runs = _repeat_runs(meta)
+    # occ_s is a property of the block and region, identical for every unit.
+    # One animal per figure (see PER_ANIMAL_ONLY), so this cannot silently
+    # collapse two different numbers into one.
+    t = (si.groupby(["slot", "island"])["occ_s"].first().unstack("island"))
+    if si["animal"].nunique() > 1:
+        raise ValueError("island_moving_time is per animal: "
+                         f"got {sorted(si['animal'].unique())}")
+    gi = {}
+    for sl, d in si.groupby("slot"):
+        g = d["goal_node"].dropna().astype(str)
+        g = g[~g.isin(("", "nan", "None"))]
+        if not g.empty:
+            gi[sl] = maze.island_of_node(g.mode().iat[0])
+    for isl in regions:
+        if isl not in t.columns:
+            continue
+        colour = ISLAND_COLOURS[isl]
+        y = np.array([t[isl].get(x, np.nan) for x in slots], float)
+        dash = {"dashes": ISLAND_DASH[isl]} if isl in ISLAND_DASH else {}
+        for j, run in enumerate(runs):
+            kw = dict(dash)
+            if j == 0:
+                kw["label"] = ISLAND_WHERE[isl]
+            ax.plot(pos[run], y[run], "-", color=colour, lw=_lw(1.4), zorder=4,
+                    **kw)
+        good = ~np.isnan(y)
+        ax.plot(pos[good], y[good], "o", ms=3.4, color=colour, mec="white",
+                mew=_lw(0.9), zorder=5)
+        # The ring says "the goal was here", which is the point of the figure.
+        on = np.array([gi.get(x) == isl for x in slots])
+        ring = good & on
+        if ring.any():
+            ax.plot(pos[ring], y[ring], "o", ms=8.5, mfc="none", mec=colour,
+                    mew=_lw(1.5), zorder=6)
+    ax.plot([], [], "o", ms=8.5, mfc="none", mec=style.P.MUTED, mew=_lw(1.5),
+            label="goal on this island")
+    style.slot_axis(ax, slots, pos, goals=goals, animals=goal_animals)
+    ax.set_ylabel("moving time on island (s)\n"
+                  "trial windows, speed > 0.05 m/s",
+                  fontsize=style.FS["label"], color=style.P.INK, labelpad=3)
+    ax.set_ylim(bottom=0)
+    style.legend(ax, loc="upper left", ncol=2)
+    style.maze_inset(ax.figure, ISLAND_COLOURS,
+                     bridge_colour=ISLAND_COLOURS[maze.BRIDGE],
+                     bridge_dashes=ISLAND_DASH[maze.BRIDGE])
+    isl_only = si[si["island"].between(1, 4)]
+    b = (isl_only.groupby(["animal", "slot", "island"])["occ_s"]
+                 .first().reset_index())
+    b["goal"] = [gi.get(x) == k for x, k in zip(b["slot"], b["island"])]
+    g = b.groupby("goal")["occ_s"]
+    print(f"  {name}: moving time per island per block, median "
+          f"{b['occ_s'].median():.0f} s "
+          f"(range {b['occ_s'].min():.0f}-{b['occ_s'].max():.0f}).")
+    for k, v in g:
+        print(f"    {'goal island' if k else 'other islands':14} "
+              f"median {v.median():6.1f} s   n={len(v)}")
+    if si["island"].eq(maze.BRIDGE).any():
+        print(f"    {'bridges':14} median "
+              f"{si[si.island == maze.BRIDGE].groupby('slot')['occ_s'].first().median():6.1f} s")
+    return style.save(fig, name)
+
+
 def island_sig_fraction(trials_unused=None, name="island_sig_fraction", si=None,
                         matched=False):
     """The FRACTION of cells that beat their own shuffle, per block and region.
@@ -1198,6 +1288,13 @@ def _takes_si(fn):
 #: picture under a name that contradicts it.
 COMBINED_ONLY = ("schematic_maze", "schematic_trial", "schematic_schedule")
 
+#: Figures that must NOT be drawn with the animals together. `island_moving_time`
+#: reads one value per (block, region), which is a property of that animal's
+#: behaviour: pooling takes the first of two different numbers and prints a
+#: figure of one animal under both their names. The goal ring is ambiguous too,
+#: because the two animals had the goal on different islands at the same time.
+PER_ANIMAL_ONLY = ("island_moving_time",)
+
 
 def draw(name, trials, si=None, animals=None, combined=True):
     """Draw figure `name` once per animal, and once with the animals together.
@@ -1220,7 +1317,7 @@ def draw(name, trials, si=None, animals=None, combined=True):
         # are not. The attribute sits next to the function that needs it.
         si = getattr(fn, "si_source", data.island_si)()
     out = []
-    if combined:
+    if combined and name not in PER_ANIMAL_ONLY:
         out += list(fn(trials, name=name, **({"si": si} if uses_si else {})))
     if name in COMBINED_ONLY:
         return out
@@ -1257,6 +1354,8 @@ DEFAULT_FIGURES = (
     "detour_trials_2_5",
     "success_rate",
     "trials_to_first_success",
+    # exposure, which several apparent results turned out to follow
+    "island_moving_time",
     # how many cells code position, under each control in turn
     "island_sig_fraction",
     "island_sig_fraction_matched",
@@ -1283,6 +1382,7 @@ REGISTRY = {
     "island_spatial_info_bars_sig": island_spatial_info_bars_sig,
     "island_spatial_info_bars_raw": island_spatial_info_bars_raw,
     "island_spatial_info_bars_raw_sig": island_spatial_info_bars_raw_sig,
+    "island_moving_time": island_moving_time,
     "island_sig_fraction": island_sig_fraction,
     "island_sig_fraction_matched": island_sig_fraction_matched,
     "island_sig_fraction_dwell_time_spikes": island_sig_fraction_dwell,

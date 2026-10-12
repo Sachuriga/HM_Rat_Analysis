@@ -375,6 +375,79 @@ def island_si_bin(root=None, cache=True, rebuild=False, **kw):
     return out
 
 
+#: Checkpoints for the goal-trials-only walk.
+GOAL_CHECKPOINT_DIR = Path(os.environ.get(
+    "HM_GOAL_CHECKPOINTS",
+    Path.home() / ".cache" / "hm_rat_analysis" / "island_si_goal"))
+
+
+def build_island_si_goal(root=None, progress=True, resume=True, **kw):
+    """Walk every session using the GOAL TRIALS only.
+
+    The main table scores all trial windows, and two thirds of that time is free
+    roaming: the three ten-minute periods in a session come to 991 minutes
+    across the dataset against 545 minutes of goal trials. So the main table's
+    spatial information is mostly about an animal exploring, not about an animal
+    going somewhere. This walk drops every window that is not a goal trial.
+
+    Expect it to be thin. Goal trials average 44 s, the speed gate keeps about a
+    third of the frames, and that third is then split across four islands, so
+    the exposure behind each value is roughly a third of the main table's.
+    """
+    root = ROOT if root is None else Path(root)
+    GOAL_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    kw.setdefault("trial_types", (GOAL_TRIAL_TYPE,))
+    frames = []
+    sess = list(_sessions(root))
+    for i, (animal, date, d) in enumerate(sess, 1):
+        nwb = next((p for p in sorted(d.glob("*.nwb"))
+                    if not p.name.startswith("._")
+                    and not p.name.endswith(".tmp.nwb")), None)
+        if nwb is None:
+            continue
+        ck = GOAL_CHECKPOINT_DIR / f"{animal}_{date}.parquet"
+        if resume and ck.exists():
+            if progress:
+                print(f"  [{i}/{len(sess)}] {animal} {date}  (checkpoint)",
+                      flush=True)
+            frames.append(pd.read_parquet(ck))
+            continue
+        if progress:
+            print(f"  [{i}/{len(sess)}] {animal} {date}", flush=True)
+        try:
+            f = islands.session_island_si(nwb, **kw)
+        except Exception as e:                              # noqa: BLE001
+            print(f"      failed: {e}", flush=True)
+            continue
+        if not f.empty:
+            f.to_parquet(ck, index=False)
+            frames.append(f)
+    if not frames:
+        raise FileNotFoundError(f"no goal-trial metrics built under {root}")
+    out = pd.concat(frames, ignore_index=True)
+    meta = (trials(root=root)[["animal", "date", "repeat", "session"]]
+            .drop_duplicates(["animal", "date"]))
+    out["date"] = out["date"].astype(str)
+    meta["date"] = meta["date"].astype(str)
+    out["phase"] = out["phase"].fillna("")
+    out = out.merge(meta, on=["animal", "date"], how="left")
+    out["slot"] = [slot_label(r, s, p) for r, s, p
+                   in zip(out["repeat"], out["session"], out["phase"])]
+    return out
+
+
+def island_si_goal(root=None, cache=True, rebuild=False, **kw):
+    """The goal-trials-only table, from cache when one is there."""
+    root = ROOT if root is None else Path(root)
+    f = out_dir() / "island_spatial_info_goaltrials.csv"
+    if cache and not rebuild and f.exists():
+        return pd.read_csv(f)
+    out = build_island_si_goal(root, **kw)
+    if cache:
+        out.to_csv(f, index=False)
+    return out
+
+
 def slot_goals(df, column="goal_node", by="animal"):
     """``({slot: "410/204"}, ["Rat5", "Rat6"])``: the goal node per block.
 

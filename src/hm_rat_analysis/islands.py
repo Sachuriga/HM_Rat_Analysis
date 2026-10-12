@@ -142,7 +142,8 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
                       radius_m=maze.ISLAND_BIN_RADIUS_M,
                       match_levels=SI_MATCH_LEVELS, shuffles=SHUFFLES,
                       match_shuffles=MATCH_SHUFFLES,
-                      match_by_region=None, min_shift_s=MIN_SHIFT_S, seed=0):
+                      match_by_region=None, trial_types=None,
+                      min_shift_s=MIN_SHIFT_S, seed=0):
     """One row per (unit, segment, island) for one session.
 
     Columns: ``animal``, ``date``, ``phase`` ("" for the whole session, "a"/"b"
@@ -178,6 +179,14 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
 
     Positions are gated at :data:`SPEED_THRESH`, which is NOT the gate the
     cross-session summary uses.
+
+    `trial_types` restricts which trials contribute. None, the default, uses all
+    of them, which is what every result so far rests on — and two thirds of that
+    window time is free roaming: the three ten-minute periods in each session
+    come to 991 minutes across the dataset against 545 minutes of goal trials.
+    Pass ``(GOAL_TRIAL_TYPE,)`` to score the goal-directed running alone. The
+    phase split is taken BEFORE the filter, so dropping the goal-switch roam
+    does not destroy the a/b boundary it defines.
     """
     path = str(nwb_path)
     io = NWBHDF5IO(path, "r", load_namespaces=True)
@@ -219,10 +228,14 @@ def session_island_si(nwb_path, bin_cm=2.5, smooth_cm=5.0, speed=SPEED_THRESH,
         keep = (ql == QUALITY) & (um["cell_type"] == CELL_TYPE)
 
         rows = []
+        want_tt = None if trial_types is None else {int(q) for q in trial_types}
         for phase, seg in _phase_segments(trials):
+            # The phase split already happened, so filtering here cannot destroy
+            # the goal-switch boundary that defines a and b.
             wins = SS._merge_windows([(float(a), float(b))
                                       for (_tt, _g, _sn, a, b) in seg
-                                      if np.isfinite(a) and np.isfinite(b) and b > a])
+                                      if np.isfinite(a) and np.isfinite(b) and b > a
+                                      and (want_tt is None or int(_tt) in want_tt)])
             if not wins:
                 continue
             prep = SS._prep_positions(px, py, t_raw, wins, dt)
